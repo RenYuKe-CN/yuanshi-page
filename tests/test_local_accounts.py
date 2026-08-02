@@ -279,6 +279,22 @@ class LocalAccountTests(unittest.TestCase):
             detail = conn.execute("SELECT detail FROM operation_logs WHERE action='SAVE_CMC_KEY'").fetchone()["detail"]
         self.assertNotIn(key, detail)
 
+    def test_smtp_config_persists_and_password_is_masked(self):
+        config = {
+            "host": "smtp.example.com",
+            "port": 587,
+            "user": "no-reply@example.com",
+            "password": "secret-smtp-password",
+            "from": "no-reply@example.com",
+            "mode": "starttls",
+        }
+        APP.save_smtp_config(config)
+        self.assertEqual(APP.load_smtp_config(), config)
+        with open(APP.smtp_config_file(), "r", encoding="utf-8") as file:
+            saved = file.read()
+        self.assertIn("secret-smtp-password", saved)
+        self.assertEqual(os.stat(APP.smtp_config_file()).st_mode & 0o777, 0o600)
+
     def delete_as(self, actor, target_id):
         handler, result = self.handler({"csrf": "token", "id": str(target_id)})
         handler.require_user = types.MethodType(

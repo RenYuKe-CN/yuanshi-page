@@ -45,6 +45,7 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER)
+SMTP_MODE = os.environ.get("SMTP_MODE", "starttls")
 BRAND_DIR = os.path.join(BASE_DIR, "public", "brand")
 EXCHANGE_DATA_PATH = os.path.join(BASE_DIR, "data", "exchanges.json")
 ASSETS = {
@@ -305,18 +306,63 @@ def email_suffix_options(selected="@gmail.com"):
     )
 
 
-def send_verification_email(email, code):
-    if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD and SMTP_FROM):
-        raise RuntimeError("邮箱验证码服务未配置，请先在环境变量中配置 SMTP_HOST、SMTP_USER、SMTP_PASSWORD、SMTP_FROM。")
+def smtp_config_file():
+    return os.path.join(DATA_DIR, "smtp.json")
+
+
+def load_smtp_config():
+    config = {}
+    try:
+        with open(smtp_config_file(), "r", encoding="utf-8") as file:
+            loaded = json.load(file)
+        if isinstance(loaded, dict):
+            config = loaded
+    except (OSError, ValueError):
+        pass
+    return {
+        "host": str(config.get("host") or SMTP_HOST).strip(),
+        "port": int(config.get("port") or SMTP_PORT),
+        "user": str(config.get("user") or SMTP_USER).strip(),
+        "password": str(config.get("password") or SMTP_PASSWORD),
+        "from": str(config.get("from") or SMTP_FROM).strip(),
+        "mode": str(config.get("mode") or SMTP_MODE).strip().lower(),
+    }
+
+
+def save_smtp_config(config):
+    path = smtp_config_file()
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(config, file, ensure_ascii=False, indent=2)
+    os.chmod(path, 0o600)
+
+
+def deliver_email(to, subject, body):
+    config = load_smtp_config()
+    if not (config["host"] and config["user"] and config["password"] and config["from"]):
+        raise RuntimeError("邮箱验证码服务未配置，请先在系统设置中填写 SMTP 参数。")
     message = EmailMessage()
-    message["Subject"] = "原石金手指 · 注册验证码"
-    message["From"] = SMTP_FROM
-    message["To"] = email
-    message.set_content("您的注册验证码是：%s\n\n验证码 10 分钟内有效。若非本人操作，请忽略此邮件。" % code)
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=12) as smtp:
-        smtp.starttls()
-        smtp.login(SMTP_USER, SMTP_PASSWORD)
-        smtp.send_message(message)
+    message["Subject"] = subject
+    message["From"] = config["from"]
+    message["To"] = to
+    message.set_content(body)
+    if config["mode"] == "ssl":
+        with smtplib.SMTP_SSL(config["host"], config["port"], timeout=12) as smtp:
+            smtp.login(config["user"], config["password"])
+            smtp.send_message(message)
+    else:
+        with smtplib.SMTP(config["host"], config["port"], timeout=12) as smtp:
+            if config["mode"] != "none":
+                smtp.starttls()
+            smtp.login(config["user"], config["password"])
+            smtp.send_message(message)
+
+
+def send_verification_email(email, code):
+    deliver_email(
+        email,
+        "原石金手指 · 注册验证码",
+        "您的注册验证码是：%s\n\n验证码 10 分钟内有效。若非本人操作，请忽略此邮件。" % code,
+    )
 
 
 def user_identity(row):
@@ -937,6 +983,10 @@ class App(BaseHTTPRequestHandler):
             return self.save_cmc_key()
         if path == "/settings/cmc-sync":
             return self.sync_cmc()
+        if path == "/settings/smtp":
+            return self.save_smtp()
+        if path == "/settings/smtp-test":
+            return self.send_smtp_test()
         self.send_html("Not Found", 404)
 
     def login(self):
@@ -1984,8 +2034,42 @@ class App(BaseHTTPRequestHandler):
             )
         else:
             cmc_card = '<div class="card"><h2>CoinMarketCap 官方图标</h2><p>已缓存官方图标：<strong>%s</strong> 个</p><p class="muted">只有总管理员可以配置 API Key 和执行同步。</p></div>' % icon_count
+        smtp_cfg = load_smtp_config()
+        smtp_ready = bool(smtp_cfg["host"] and smtp_cfg["user"] and smtp_cfg["password"] and smtp_cfg["from"])
+        mode_options = "".join(
+            '<option value="%s"%s>%s</option>' % (
+                value,
+                " selected" if smtp_cfg["mode"] == value else "",
+                label,
+            )
+            for value, label in (("starttls", "STARTTLS（推荐）"), ("ssl", "SSL/TLS"), ("none", "无加密"))
+        )
+        smtp_card = """<div class="card"><h2>邮件服务（注册验证码）</h2>
+        <p>状态：<strong>%s</strong>　当前服务器：<code>%s:%s</code></p>
+        <p class="muted">配置保存在服务器的 <code>local_data/smtp.json</code>，权限为 600，不会写入 GitHub。保存后立即生效，无需重启服务。</p>
+        <form method="post" action="/settings/smtp"><input type="hidden" name="csrf" value="%s"><div class="grid">
+        <div class="col6"><label>SMTP 服务器</label><input name="host" value="%s" placeholder="例如 smtp.qq.com" required></div>
+        <div class="col3"><label>端口</label><input name="port" type="number" min="1" max="65535" value="%s" required></div>
+        <div class="col3"><label>加密方式</label><select name="mode">%s</select></div>
+        <div class="col6"><label>登录账号</label><input name="user" value="%s" autocomplete="off" required></div>
+        <div class="col6"><label>发件人</label><input name="from" value="%s" autocomplete="off" required></div>
+        <div class="col12"><label>SMTP 密码</label><input name="password" type="password" autocomplete="new-password" placeholder="留空则保留当前密码"><p class="hint">QQ/163 等邮箱请使用“授权码”而不是登录密码。</p></div>
+        <div class="col12"><button>保存邮件配置</button></div></div></form>
+        <form method="post" action="/settings/smtp-test" style="margin-top:14px"><input type="hidden" name="csrf" value="%s"><label>测试收件邮箱</label><input name="test_email" type="email" placeholder="your@example.com" required><div style="margin-top:10px"><button class="secondary" %s>发送测试邮件</button></div></form></div>""" % (
+            "已配置" if smtp_ready else "尚未配置",
+            esc(smtp_cfg["host"] or "未设置"),
+            smtp_cfg["port"],
+            session["csrf"],
+            esc(smtp_cfg["host"]),
+            smtp_cfg["port"],
+            mode_options,
+            esc(smtp_cfg["user"]),
+            esc(smtp_cfg["from"]),
+            session["csrf"],
+            "" if smtp_ready else "disabled",
+        )
         content = flash + """<div class="grid"><div class="card col4"><div class="muted">用户数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">IP 记录数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">操作日志数</div><div class="stat">%s</div></div></div>
-        %s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, cmc_card)
+        %s%s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, smtp_card, cmc_card)
         self.send_html(self.page(session, "系统设置", content, "settings"))
 
     def save_cmc_key(self):
@@ -2004,6 +2088,63 @@ class App(BaseHTTPRequestHandler):
         with db() as conn:
             log_action(conn, session["user"]["id"], "SAVE_CMC_KEY", "SYSTEM", detail="CMC API Key 已更新（未记录内容）")
         self.redirect("/settings?message=" + urllib.parse.quote("CMC API Key 已安全保存，请点击同步图标。"))
+
+    def save_smtp(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form) or not session["user"]["is_owner"]:
+            return self.send_html("Forbidden", 403)
+        host = form.get("host", "").strip()
+        user = form.get("user", "").strip()
+        from_addr = form.get("from", "").strip()
+        password = form.get("password", "")
+        mode = form.get("mode", "starttls").strip().lower()
+        try:
+            port = int(form.get("port", "0") or "0")
+        except ValueError:
+            port = 0
+        if mode not in ("starttls", "ssl", "none"):
+            mode = "starttls"
+        if port < 1 or port > 65535 or not host or not user or not from_addr:
+            return self.redirect("/settings?message=" + urllib.parse.quote("请完整填写 SMTP 服务器、端口、账号和发件人。"))
+        existing = load_smtp_config()
+        if not password:
+            password = existing.get("password", "")
+        if not password:
+            return self.redirect("/settings?message=" + urllib.parse.quote("SMTP 密码不能为空，或留空以保留当前密码。"))
+        save_smtp_config({
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "from": from_addr,
+            "mode": mode,
+        })
+        with db() as conn:
+            log_action(conn, session["user"]["id"], "SAVE_SMTP", "SYSTEM", detail="SMTP 配置已更新（未记录密码）")
+        self.redirect("/settings?message=" + urllib.parse.quote("邮件配置已保存，建议点击发送测试邮件确认可用。"))
+
+    def send_smtp_test(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form) or not session["user"]["is_owner"]:
+            return self.send_html("Forbidden", 403)
+        test_email = form.get("test_email", "").strip().lower()
+        if not EMAIL_RE.fullmatch(test_email):
+            return self.redirect("/settings?message=" + urllib.parse.quote("测试收件邮箱格式不正确。"))
+        try:
+            deliver_email(test_email, "原石金手指 · 邮件服务测试", "这是一封测试邮件，说明 SMTP 邮件服务已配置成功。")
+        except Exception as error:
+            message = "测试邮件发送失败：%s" % str(error)
+            self.redirect("/settings?message=" + urllib.parse.quote(message))
+            return
+        with db() as conn:
+            log_action(conn, session["user"]["id"], "TEST_SMTP", "SYSTEM", detail="测试邮件已发送至 %s" % test_email)
+        self.redirect("/settings?message=" + urllib.parse.quote("测试邮件已发送，请查收 %s。" % test_email))
 
     def sync_cmc(self):
         session = self.require_user(admin=True)
