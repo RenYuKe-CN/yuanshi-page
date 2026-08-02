@@ -438,10 +438,14 @@ def load_cmc_icon_map():
 def exchange_icon_markup(value):
     label = exchange_label(value)
     manual_icon = MANUAL_EXCHANGE_ICONS.get(label)
-    if manual_icon:
+    manual_path = ASSETS.get(manual_icon, ("",))[0] if manual_icon else ""
+    if manual_path and os.path.exists(manual_path):
         return '<img class="exchange-icon exchange-icon-img" src="%s" alt="%s 图标">' % (manual_icon, esc(label))
     filename = load_cmc_icon_map().get(label)
-    if isinstance(filename, str) and re.fullmatch(r"[0-9a-f]{32}\.png", filename):
+    if isinstance(filename, str) and re.fullmatch(r"[0-9a-f]{32}\.png", filename) and (
+        os.path.exists(os.path.join(CMC_ICON_DIR, filename))
+        or os.path.exists(os.path.join(BRAND_DIR, "exchanges", filename))
+    ):
         return '<img class="exchange-icon exchange-icon-img" src="/assets/exchanges/%s" alt="%s 图标">' % (filename, esc(label))
     return '<span class="exchange-icon" style="--h:%s">%s</span>' % (exchange_icon_hue(label), esc(exchange_icon_text(label)))
 
@@ -1208,6 +1212,47 @@ class App(BaseHTTPRequestHandler):
                 pass
 
         missing = {symbol for symbol, *_rest in pairs} - {item["symbol"] for item in items}
+        if missing:
+            try:
+                headers = {"User-Agent": "Yuanshi-Jinshouzhi/1.0"}
+                request = urllib.request.Request("https://api.bybit.com/v5/market/tickers?category=spot", headers=headers)
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    spot_rows = json.loads(response.read().decode("utf-8")).get("result", {}).get("list", [])
+                bybit_symbols = {
+                    "BTC-USDT": "BTCUSDT",
+                    "ETH-USDT": "ETHUSDT",
+                    "SOL-USDT": "SOLUSDT",
+                    "BNB-USDT": "BNBUSDT",
+                    "OKB-USDT": "OKBUSDT",
+                }
+                for symbol, base, *_rest in pairs:
+                    if symbol not in missing:
+                        continue
+                    row = next((entry for entry in spot_rows if entry.get("symbol") == bybit_symbols.get(symbol)), None)
+                    price = number((row or {}).get("lastPrice"))
+                    if not row or price is None:
+                        continue
+                    change = number(row.get("price24hPcnt"))
+                    ts = int(row.get("timestamp", "0") or "0")
+                    items.append({
+                        "symbol": symbol,
+                        "base": base,
+                        "venue": "Bybit",
+                        "marketType": "SPOT",
+                        "price": price,
+                        "indexPrice": price,
+                        "change24h": change * 100 if change is not None else None,
+                        "high24h": number(row.get("highPrice24h")),
+                        "low24h": number(row.get("lowPrice24h")),
+                        "volume24h": number(row.get("turnover24h")),
+                        "updatedAt": datetime.fromtimestamp(ts / 1000).isoformat() if ts else now_iso(),
+                    })
+                if any(item["venue"] == "Bybit" for item in items):
+                    sources.append("Bybit")
+            except Exception:
+                pass
+
+        missing = {symbol for symbol, *_rest in pairs} - {item["symbol"] for item in items}
         if missing and os.path.exists(CMC_KEY_FILE):
             try:
                 with open(CMC_KEY_FILE, "r", encoding="utf-8") as f:
@@ -1360,6 +1405,31 @@ class App(BaseHTTPRequestHandler):
             candles = [item for item in candles if None not in (item["open"], item["high"], item["low"], item["close"])]
             if candles:
                 return self.send_json({"symbol": symbol, "interval": interval, "source": "OKX", "items": normalize(candles)})
+        except Exception:
+            pass
+
+        bybit_intervals = {"5m": "5", "15m": "15", "1H": "60", "4H": "240"}
+        try:
+            url = "https://api.bybit.com/v5/market/kline?category=spot&symbol=%s&interval=%s&limit=160" % (
+                urllib.parse.quote(pairs[symbol]["binance"] or pairs[symbol]["okx"].replace("-", "")),
+                urllib.parse.quote(bybit_intervals[interval]),
+            )
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=8) as response:
+                rows = json.loads(response.read().decode("utf-8")).get("result", {}).get("list", [])
+            candles = []
+            for row in rows:
+                candles.append({
+                    "time": int(row[0]) * 1000,
+                    "open": number(row[1]),
+                    "high": number(row[2]),
+                    "low": number(row[3]),
+                    "close": number(row[4]),
+                    "volume": number(row[5]),
+                })
+            candles = [item for item in candles if None not in (item["open"], item["high"], item["low"], item["close"])]
+            if candles:
+                return self.send_json({"symbol": symbol, "interval": interval, "source": "Bybit", "items": normalize(candles)})
         except Exception:
             pass
         return self.send_json({"error": "K线行情暂时无法连接"}, 503)

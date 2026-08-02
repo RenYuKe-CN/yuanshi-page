@@ -255,7 +255,10 @@ class LocalAccountTests(unittest.TestCase):
         filename = "a" * 32 + ".png"
         with open(APP.CMC_ICON_MAP_FILE, "w", encoding="utf-8") as file:
             file.write('{"Binance":"%s"}' % filename)
-        self.assertIn('/assets/exchanges/%s' % filename, APP.exchange_icon_markup("Binance"))
+        markup = APP.exchange_icon_markup("Binance")
+        self.assertNotIn(filename, markup)
+        self.assertIn('<span class="exchange-icon"', markup)
+        os.remove(APP.CMC_ICON_MAP_FILE)
 
     def test_only_owner_can_save_cmc_key_and_key_is_not_logged(self):
         with APP.db() as conn:
