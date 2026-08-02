@@ -38,7 +38,7 @@ TOKEN_CONTRACTS = {
 }
 PLAN_CONFIG = {
     "STARSHIP": {"name": "星舰会员", "price": 12.0, "limit": 10, "days": 30},
-    "PRO": {"name": "旗舰 PRO", "price": 19.9, "limit": -1, "days": 30},
+    "PRO": {"name": "旗舰 PRO", "price": 39.9, "limit": -1, "days": 30},
 }
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
@@ -1558,7 +1558,7 @@ class App(BaseHTTPRequestHandler):
         plans = [
             ("plan-free", "", "基础入口", "普通用户", "0", "默认账户", ["可以注册、登录和浏览页面", "不能执行 IP 查询", "需要开通会员后使用查重功能"]),
             ("plan-starship", "STARSHIP", "热门开通", "星舰会员", "12", "USDT / USDC", ["全部 CEX 与 DEX", "会员周期内总查询 10 次", "开通日起一个自然月", "适合小团队环境管理"]),
-            ("plan-pro", "PRO", "旗舰首选", "旗舰 PRO", "19.9", "USDT / USDC / 月", ["全部交易所", "无限查询与无限历史", "每月续费使用全部功能", "优先客服", "适合高频业务团队"]),
+            ("plan-pro", "PRO", "旗舰首选", "旗舰 PRO", "39.9", "USDT / USDC / 月", ["全部交易所", "无限查询与无限历史", "每月续费使用全部功能", "优先客服", "适合高频业务团队"]),
         ]
         plan_html = "".join(
             """<div class="card col4 plan-card %s"><span class="plan-badge">%s</span><h2>%s</h2><div><span class="plan-price">%s</span><span class="plan-unit"> %s</span></div><ul>%s</ul>%s</div>""" % (
