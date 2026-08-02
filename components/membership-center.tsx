@@ -298,7 +298,7 @@ export function MembershipCenter() {
           <p className="mt-2 text-xs text-slate-600">网络：BEP20（BSC） · 订单有效期 30 分钟</p>
           <div className="mt-4 flex gap-3 rounded-xl border border-amber-400/30 bg-amber-400/10 p-3 text-xs leading-5 text-amber-100">
             <AlertTriangle size={17} className="mt-0.5 shrink-0 text-amber-300" />
-            <p>订单金额仅指实际转入的 USDT / USDC。发起 BEP20 转账时，钱包会另外扣除 BNB 作为 Gas 费；请预留足够 BNB，切勿从订单 Token 金额中扣除手续费。</p>
+            <div><p className="font-bold text-amber-200">开通条件：收款地址必须足额到账订单显示的 USDT / USDC 金额。</p><p className="mt-1">BEP20 Gas 费由付款方自行额外承担，并由钱包以 BNB 扣除。请预留足够 BNB，不能从订单 Token 金额中扣除；少转或到账不足，系统无法自动开通会员。</p></div>
           </div>
         </div>
         {payment && (
@@ -326,7 +326,7 @@ export function MembershipCenter() {
             <input value={txHash} onChange={(e) => setTxHash(e.target.value)} placeholder="Transaction Hash（钱包付款后自动填写，也可手动粘贴）" className="dark-input min-w-0 flex-1 rounded-xl px-4 py-3 text-sm" />
             <button disabled={busy} onClick={() => verify(order.order.id)} className="gold-button inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold disabled:opacity-50">{busy ? <LoaderCircle size={16} className="animate-spin" /> : <ExternalLink size={16} />}自动验证</button>
           </div>
-          <p className="mt-3 text-xs leading-5 text-amber-200">请确保收款地址实际到账 {order.order.amount} {order.order.paymentToken}；Gas 费由钱包额外以 BNB 支付，不计入订单金额。</p>
+          <p className="mt-3 text-xs leading-5 text-amber-200"><strong>开通条件：</strong>收款地址必须实际到账 {order.order.amount} {order.order.paymentToken}。Gas 费由付款方额外以 BNB 支付，不计入订单金额；到账不足将无法自动开通会员。</p>
         </section>
       )}
 
