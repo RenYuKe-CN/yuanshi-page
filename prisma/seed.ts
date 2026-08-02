@@ -31,7 +31,7 @@ const planSeed = [
     code: "PRO",
     name: "旗舰 PRO",
     description: "每月续费制，开通日起一个自然月内可使用全部功能。",
-    priceUsd: 19.9,
+    priceUsd: 39.9,
     durationDays: 30,
     durationMonths: 1,
     queryLimit: null,
