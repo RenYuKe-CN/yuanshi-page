@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, Copy, Crown, ExternalLink, LoaderCircle, Rocket, ShieldCheck, WalletCards } from "lucide-react";
+import { AlertTriangle, Check, Copy, Crown, ExternalLink, LoaderCircle, Rocket, ShieldCheck, WalletCards } from "lucide-react";
 import { api } from "@/components/api";
 
 type Plan = {
@@ -155,6 +155,42 @@ export function MembershipCenter() {
     }
   }
 
+  function formatBnb(wei: bigint) {
+    const whole = wei / 1_000_000_000_000_000_000n;
+    const fraction = (wei % 1_000_000_000_000_000_000n)
+      .toString()
+      .padStart(18, "0")
+      .slice(0, 6)
+      .replace(/0+$/, "");
+    return `${whole}${fraction ? `.${fraction}` : ""}`;
+  }
+
+  async function confirmNetworkFee(activeProvider: Eip1193Provider, account: string, created: OrderResponse) {
+    try {
+      const transaction = {
+        from: account,
+        to: created.payment.tokenContract,
+        value: "0x0",
+        data: created.payment.transferData
+      };
+      const [balanceHex, gasPriceHex, gasHex] = await Promise.all([
+        activeProvider.request({ method: "eth_getBalance", params: [account, "latest"] }) as Promise<string>,
+        activeProvider.request({ method: "eth_gasPrice" }) as Promise<string>,
+        activeProvider.request({ method: "eth_estimateGas", params: [transaction] }) as Promise<string>
+      ]);
+      const balance = BigInt(balanceHex);
+      const fee = BigInt(gasPriceHex) * BigInt(gasHex);
+      const sufficient = balance >= fee;
+      const detail = `本订单须向商家转入 ${created.order.amount} ${created.order.paymentToken}；网络手续费另以 BNB 支付，预估约 ${formatBnb(fee)} BNB。当前钱包 BNB 余额约 ${formatBnb(balance)} BNB。${sufficient ? "" : " 当前 BNB 余额不足以支付网络手续费，请先充值 BNB。"}`;
+      if (!window.confirm(`${detail}\n\n继续发起交易吗？`)) throw new Error("已取消付款");
+    } catch (error) {
+      if (error instanceof Error && error.message === "已取消付款") throw error;
+      if (!window.confirm(`本订单须向商家转入 ${created.order.amount} ${created.order.paymentToken}，网络手续费需额外以 BNB 支付，不能从订单 Token 金额中扣除。\n\n暂无法预估手续费，请确认钱包中留有足够 BNB 后继续。`)) {
+        throw new Error("已取消付款");
+      }
+    }
+  }
+
   async function buy(planCode: string) {
     setBusy(true);
     setMessage("");
@@ -184,6 +220,7 @@ export function MembershipCenter() {
           }]
         });
       }
+      await confirmNetworkFee(activeProvider, account, created);
       const hash = await activeProvider.request({
         method: "eth_sendTransaction",
         params: [{
@@ -216,6 +253,7 @@ export function MembershipCenter() {
           <div className="glass-card rounded-2xl px-5 py-3 text-sm">
             <span className="text-slate-500">当前：</span><strong className="text-amber-300">{membership?.planName || "加载中"}</strong>
             <span className="ml-4 text-slate-500">剩余：</span><strong className="text-white">{membership?.unlimited ? "无限" : membership?.remaining ?? 0}</strong>
+            <span className="ml-4 text-slate-500">到期：</span><strong className="text-white">{membership?.expiresAt ? new Date(membership.expiresAt).toLocaleString() : "-"}</strong>
           </div>
         </div>
       </header>
@@ -258,6 +296,10 @@ export function MembershipCenter() {
           </div>
           <p className="mt-3 break-all text-xs text-slate-600">钱包：{wallet || "未连接"}</p>
           <p className="mt-2 text-xs text-slate-600">网络：BEP20（BSC） · 订单有效期 30 分钟</p>
+          <div className="mt-4 flex gap-3 rounded-xl border border-amber-400/30 bg-amber-400/10 p-3 text-xs leading-5 text-amber-100">
+            <AlertTriangle size={17} className="mt-0.5 shrink-0 text-amber-300" />
+            <p>订单金额仅指实际转入的 USDT / USDC。发起 BEP20 转账时，钱包会另外扣除 BNB 作为 Gas 费；请预留足够 BNB，切勿从订单 Token 金额中扣除手续费。</p>
+          </div>
         </div>
         {payment && (
           <div className="flex items-center gap-4 rounded-2xl bg-white p-3 text-slate-900">
@@ -284,6 +326,7 @@ export function MembershipCenter() {
             <input value={txHash} onChange={(e) => setTxHash(e.target.value)} placeholder="Transaction Hash（钱包付款后自动填写，也可手动粘贴）" className="dark-input min-w-0 flex-1 rounded-xl px-4 py-3 text-sm" />
             <button disabled={busy} onClick={() => verify(order.order.id)} className="gold-button inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold disabled:opacity-50">{busy ? <LoaderCircle size={16} className="animate-spin" /> : <ExternalLink size={16} />}自动验证</button>
           </div>
+          <p className="mt-3 text-xs leading-5 text-amber-200">请确保收款地址实际到账 {order.order.amount} {order.order.paymentToken}；Gas 费由钱包额外以 BNB 支付，不计入订单金额。</p>
         </section>
       )}
 

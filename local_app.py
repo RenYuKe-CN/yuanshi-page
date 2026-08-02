@@ -387,6 +387,18 @@ def can_query_local(user):
     return True, ""
 
 
+def user_display_label(user):
+    if user["is_owner"]:
+        return "总管理员"
+    if user["role"] == "ADMIN":
+        return "备用管理员"
+    plan = user["membership_plan"] if "membership_plan" in user.keys() else "FREE"
+    status = user["membership_status"] if "membership_status" in user.keys() else "FREE"
+    if status == "ACTIVE" and plan in PLAN_CONFIG:
+        return PLAN_CONFIG[plan]["name"]
+    return "普通用户"
+
+
 def bsc_rpc(method, params):
     payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8")
     request = urllib.request.Request(
@@ -446,7 +458,19 @@ def verify_bep20_payment(tx_hash, token, expected_amount, receiver):
 def activate_membership(conn, user_id, plan):
     config = PLAN_CONFIG[plan]
     ts = now()
-    expires_at = (datetime.utcnow() + timedelta(days=config["days"])).isoformat(timespec="seconds")
+    base = datetime.now()
+    current = conn.execute(
+        "SELECT membership_expires_at,membership_plan FROM users WHERE id=?",
+        (user_id,),
+    ).fetchone()
+    if current and current["membership_expires_at"]:
+        try:
+            previous = datetime.strptime(current["membership_expires_at"], "%Y-%m-%d %H:%M:%S")
+            if previous > base:
+                base = previous
+        except ValueError:
+            pass
+    expires_at = (base + timedelta(days=config["days"])).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
         "UPDATE users SET membership_plan=?,membership_status='ACTIVE',query_limit=?,query_used=0,membership_expires_at=?,updated_at=? WHERE id=?",
         (plan, config["limit"], expires_at, ts, user_id),
@@ -871,7 +895,7 @@ class App(BaseHTTPRequestHandler):
         return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s · 原石金手指</title><style>%s</style></head>
         <body><div class="layout"><aside class="side"><div class="brandhead"><img class="brandmark" src="/assets/ck-logo.jpg" alt="CK原石图标"><div class="logo">原石金手指<small>WEB3 风控终端</small></div></div><nav class="nav">%s</nav><section class="business"><div class="business-title">核心业务矩阵</div><div class="business-list">%s</div></section></aside>
         <main class="main"><div class="top"><div><h1>%s</h1><div class="muted">Gold Finger · Web3 用户增长 / 安全风控 / 女巫检测 / 钱包画像</div></div><div>%s · %s　<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="%s"><button class="secondary">退出</button></form></div></div>%s<div class="contact">产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>　·　<a href="https://t.me/B132609" target="_blank" rel="noopener noreferrer">技术业务交流群</a></div></main></div><script src="/assets/exchange-picker.js?v=20260801-5" defer></script><script src="/assets/market-ticker.js?v=20260801-5" defer></script></body></html>""" % (
-            esc(title), STYLE, links, business, esc(title), esc(user["username"]), "总管理员" if user["is_owner"] else ("备用管理员" if user["role"] == "ADMIN" else "普通用户"), session["csrf"], content
+            esc(title), STYLE, links, business, esc(title), esc(user["username"]), user_display_label(user), session["csrf"], content
         )
 
     def login_page(self, error=""):
@@ -1662,19 +1686,25 @@ class App(BaseHTTPRequestHandler):
             expires_at = activate_membership(conn, session["user"]["id"], order["plan"])
             conn.execute("UPDATE membership_orders SET tx_hash=?,status='PAID',verify_detail=?,paid_at=?,updated_at=? WHERE id=?", (tx_hash, detail, ts, ts, order["id"]))
             log_action(conn, session["user"]["id"], "VERIFY_ORDER_PAID", "MEMBERSHIP_ORDER", order_no, detail)
-        self.redirect("/membership?message=" + urllib.parse.quote("付款验证成功，会员已自动开通，到期时间：" + expires_at))
+        self.redirect("/membership?success=1")
 
     def membership(self, query):
         session = self.require_user()
         if not session:
             return
         message = query.get("message", [""])[0]
+        if query.get("success", [""])[0] == "1":
+            message = "付款验证成功，会员权益已开通并同步到当前账号。"
         order_no = query.get("order", [""])[0]
         flash = '<div class="flash">%s</div>' % esc(message) if message else ""
         order = None
         if order_no:
             with db() as conn:
                 order = conn.execute("SELECT * FROM membership_orders WHERE order_no=? AND user_id=?", (order_no, session["user"]["id"])).fetchone()
+        with db() as conn:
+            current_user = conn.execute("SELECT role,is_owner,membership_plan,membership_status,membership_expires_at FROM users WHERE id=?", (session["user"]["id"],)).fetchone()
+        current_plan = user_display_label(current_user)
+        current_expiry = current_user["membership_expires_at"] or "暂无到期时间"
         plans = [
             ("plan-free", "", "基础入口", "普通用户", "0", "默认账户", ["可以注册、登录和浏览页面", "不能执行 IP 查询", "需要开通会员后使用查重功能"]),
             ("plan-starship", "STARSHIP", "热门开通", "星舰会员", "12", "USDT / USDC", ["全部 CEX 与 DEX", "会员周期内总查询 10 次", "开通日起一个自然月", "适合小团队环境管理"]),
@@ -1699,15 +1729,15 @@ class App(BaseHTTPRequestHandler):
             )
         else:
             verify_html = '<div class="order-box muted">请先在上方选择套餐，系统会生成订单并跳转到这里。</div>'
-        content = flash + """<div class="hero member-hero"><div><span class="hero-kicker">YS GOLD FINGER · ACCESS CONTROL</span><h2>权限中心</h2></div><img class="hero-logo" src="/assets/ck-logo.jpg" alt="原石金手指 LOGO"></div>
+        content = flash + """<div class="hero member-hero"><div><span class="hero-kicker">YS GOLD FINGER · ACCESS CONTROL</span><h2>权限中心</h2><p class="hint">当前会员：<strong>%s</strong>　到期时间：<strong>%s</strong></p></div><img class="hero-logo" src="/assets/ck-logo.jpg" alt="原石金手指 LOGO"></div>
         <div class="risk-disclaimer">⚠️ 本系统提供 Web3 风控、IP 环境管理和行情辅助信息。所有行情分析、趋势判断、技术指标仅作为信息参考，不构成任何投资建议、交易建议或投资依据。</div>
         <div class="grid">%s</div>
-        <div class="card payment-panel" id="payment"><h2>付款信息</h2><div class="grid"><div class="col6"><label>支付币种</label><div class="segments"><span class="chain-pill good">USDT</span><span class="chain-pill good">USDC</span><span class="chain-pill gold">BEP20 / BSC</span></div><p class="hint">请务必使用 BNB Smart Chain（BEP20）。其它网络付款无法自动确认。</p></div>
+        <div class="card payment-panel" id="payment"><h2>付款信息</h2><div class="grid"><div class="col6"><label>支付币种</label><div class="segments"><span class="chain-pill good">USDT</span><span class="chain-pill good">USDC</span><span class="chain-pill gold">BEP20 / BSC</span></div><p class="hint">请务必使用 BNB Smart Chain（BEP20）。其它网络付款无法自动确认。</p><p class="hint"><strong>Gas 费提示：</strong>订单中的 USDT / USDC 金额必须足额转入收款地址；链上 Gas 费需额外使用 BNB 支付，请在钱包中预留 BNB，切勿从订单金额中扣除。</p></div>
         <div class="col6 pay-address"><label>收款地址</label><input readonly value="%s" onclick="this.select()"><p class="hint">点击输入框可全选复制。</p></div></div>
         %s
         <p>如付款遇到问题，请联系：产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>。</p>
         <p class="muted">系统会自动核对 Token、网络、金额、收款地址和交易 Hash；验证成功后立即开通对应会员权益。</p></div>""" % (
-            plan_html, PAYMENT_RECEIVER, verify_html
+            esc(current_plan), esc(current_expiry), plan_html, PAYMENT_RECEIVER, verify_html
         )
         self.send_html(self.page(session, "权限中心", content, "membership"))
 
