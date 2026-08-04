@@ -30,8 +30,17 @@ ADMIN_FILE = os.path.join(DATA_DIR, "admin.txt")
 CMC_KEY_FILE = os.path.join(DATA_DIR, "cmc_api_key.txt")
 CMC_ICON_DIR = os.path.join(DATA_DIR, "exchange_icons")
 CMC_ICON_MAP_FILE = os.path.join(DATA_DIR, "exchange_icons.json")
+WEB3_RISK_CONFIG_FILE = os.path.join(DATA_DIR, "web3_risk.json")
+IP_RISK_CONFIG_FILE = os.path.join(DATA_DIR, "ip_risk.json")
+SYSTEM_CONFIG_FILE = os.path.join(DATA_DIR, "system.json")
 PAYMENT_RECEIVER = "0x04bCA584834489C26d6474701400c88D954B7782"
 BSC_RPC_URL = os.environ.get("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
+# Wallet risk queries intentionally do not fall back to fabricated demo data. Configure
+# an audited node/API in the server environment before exposing live wallet balances.
+EVM_RPC_URL = os.environ.get("EVM_RPC_URL", "").strip()
+SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "").strip()
+TRON_API_URL = os.environ.get("TRON_API_URL", "").strip()
+BTC_API_URL = os.environ.get("BTC_API_URL", "").strip()
 TOKEN_CONTRACTS = {
     "USDT": "0x55d398326f99059ff775485246999027b3197955",
     "USDC": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
@@ -87,6 +96,44 @@ ALLOWED_EMAIL_DOMAINS = (
     "zoho.com",
 )
 EMAIL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$")
+EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+TRON_ADDRESS_RE = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
+BTC_ADDRESS_RE = re.compile(r"^(?:bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$")
+
+# Centralized metadata prevents chain, wallet, exchange and protocol icons from being
+# guessed in components. Assets may be added later; until then a neutral fallback is
+# rendered and iconVerified remains false.
+FALLBACK_ICON = {"name": "未知", "symbol": "?", "icon": "", "type": "unknown", "fallbackIcon": "?", "iconVerified": False}
+CHAIN_ICON_MAP = {
+    "ethereum": {"name": "Ethereum", "symbol": "ETH", "icon": "", "type": "chain", "fallbackIcon": "ETH", "iconVerified": False},
+    "bnb": {"name": "BNB Chain", "symbol": "BNB", "icon": "", "type": "chain", "fallbackIcon": "BNB", "iconVerified": False},
+    "polygon": {"name": "Polygon", "symbol": "POL", "icon": "", "type": "chain", "fallbackIcon": "POL", "iconVerified": False},
+    "arbitrum": {"name": "Arbitrum", "symbol": "ARB", "icon": "", "type": "chain", "fallbackIcon": "ARB", "iconVerified": False},
+    "optimism": {"name": "Optimism", "symbol": "OP", "icon": "", "type": "chain", "fallbackIcon": "OP", "iconVerified": False},
+    "base": {"name": "Base", "symbol": "BASE", "icon": "", "type": "chain", "fallbackIcon": "BASE", "iconVerified": False},
+    "avalanche": {"name": "Avalanche", "symbol": "AVAX", "icon": "", "type": "chain", "fallbackIcon": "AVAX", "iconVerified": False},
+    "solana": {"name": "Solana", "symbol": "SOL", "icon": "", "type": "chain", "fallbackIcon": "SOL", "iconVerified": False},
+    "tron": {"name": "TRON", "symbol": "TRX", "icon": "", "type": "chain", "fallbackIcon": "TRX", "iconVerified": False},
+    "bitcoin": {"name": "Bitcoin", "symbol": "BTC", "icon": "", "type": "chain", "fallbackIcon": "BTC", "iconVerified": False},
+    "ton": {"name": "Ton", "symbol": "TON", "icon": "", "type": "chain", "fallbackIcon": "TON", "iconVerified": False},
+    "aptos": {"name": "Aptos", "symbol": "APT", "icon": "", "type": "chain", "fallbackIcon": "APT", "iconVerified": False},
+    "sui": {"name": "Sui", "symbol": "SUI", "icon": "", "type": "chain", "fallbackIcon": "SUI", "iconVerified": False},
+    "cosmos": {"name": "Cosmos", "symbol": "ATOM", "icon": "", "type": "chain", "fallbackIcon": "ATOM", "iconVerified": False},
+}
+WALLET_ICON_MAP = {name: {"name": name, "symbol": name[:3].upper(), "icon": "", "type": "wallet", "fallbackIcon": "W", "iconVerified": False} for name in ("MetaMask", "Phantom", "TronLink", "OKX Wallet", "Binance Web3 Wallet", "Coinbase Wallet", "Trust Wallet", "TokenPocket", "imToken", "Ledger", "Safe")}
+EXCHANGE_ICON_MAP = {name: {"name": name, "symbol": name[:4].upper(), "icon": "", "type": "cex", "fallbackIcon": "CEX", "iconVerified": False} for name in ("Binance", "OKX", "Bybit", "Coinbase", "Kraken", "Gate", "KuCoin", "HTX", "Bitget", "MEXC")}
+PROTOCOL_ICON_MAP = {name: {"name": name, "symbol": name[:4].upper(), "icon": "", "type": "dex", "fallbackIcon": "DEX", "iconVerified": False} for name in ("Uniswap", "PancakeSwap", "Curve", "Balancer", "SushiSwap", "Raydium", "Jupiter", "1inch", "GMX", "Aave", "Compound", "MakerDAO", "Lido", "EigenLayer")}
+CHECK_TYPES = {
+    "ip": {"label": "IP 地址检测", "placeholder": "请输入 IPv4 / IPv6 地址", "chain": "", "kind": "ip"},
+    "wallet": {"label": "钱包地址检测", "placeholder": "请输入钱包地址", "chain": "", "kind": "wallet"},
+    "interaction": {"label": "钱包交互地址检测", "placeholder": "请输入需要分析的钱包地址", "chain": "", "kind": "interaction"},
+    "evm": {"label": "EVM 地址检测", "placeholder": "请输入 0x 开头的钱包地址", "chain": "ethereum", "kind": "wallet"},
+    "solana": {"label": "Solana 地址检测", "placeholder": "请输入 Solana 钱包地址", "chain": "solana", "kind": "wallet"},
+    "tron": {"label": "TRON / 波场地址检测", "placeholder": "请输入 T 开头的波场地址", "chain": "tron", "kind": "wallet"},
+    "btc": {"label": "BTC 地址检测", "placeholder": "请输入 BTC 地址", "chain": "bitcoin", "kind": "wallet"},
+    "other": {"label": "其他链地址检测", "placeholder": "请输入其他链钱包地址", "chain": "", "kind": "wallet"},
+}
 BUSINESS_ITEMS = (
     ("⛁", "EFTT新增"),
     ("⌕", "交易所流动性提供"),
@@ -244,6 +291,24 @@ def init_db():
         ]:
             if column not in columns:
                 conn.execute(ddl)
+        ip_columns = {row["name"] for row in conn.execute("PRAGMA table_info(ip_records)").fetchall()}
+        for column, ddl in [
+            ("country", "ALTER TABLE ip_records ADD COLUMN country TEXT"),
+            ("region", "ALTER TABLE ip_records ADD COLUMN region TEXT"),
+            ("city", "ALTER TABLE ip_records ADD COLUMN city TEXT"),
+            ("isp", "ALTER TABLE ip_records ADD COLUMN isp TEXT"),
+            ("asn", "ALTER TABLE ip_records ADD COLUMN asn TEXT"),
+            ("ip_type", "ALTER TABLE ip_records ADD COLUMN ip_type TEXT"),
+            ("purity_score", "ALTER TABLE ip_records ADD COLUMN purity_score INTEGER"),
+            ("is_proxy", "ALTER TABLE ip_records ADD COLUMN is_proxy INTEGER"),
+            ("is_vpn", "ALTER TABLE ip_records ADD COLUMN is_vpn INTEGER"),
+            ("is_tor", "ALTER TABLE ip_records ADD COLUMN is_tor INTEGER"),
+            ("is_datacenter", "ALTER TABLE ip_records ADD COLUMN is_datacenter INTEGER"),
+            ("ip_source", "ALTER TABLE ip_records ADD COLUMN ip_source TEXT"),
+            ("ip_checked_at", "ALTER TABLE ip_records ADD COLUMN ip_checked_at TEXT"),
+        ]:
+            if column not in ip_columns:
+                conn.execute(ddl)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
         for legacy, current in LEGACY_EXCHANGES.items():
             conn.execute("UPDATE ip_records SET exchange=? WHERE exchange=?", (current, legacy))
@@ -336,6 +401,116 @@ def save_smtp_config(config):
     os.chmod(path, 0o600)
 
 
+def load_web3_risk_config():
+    defaults = {
+        "evm_rpc_url": EVM_RPC_URL,
+        "solana_rpc_url": SOLANA_RPC_URL,
+        "goplus_enabled": False,
+        "goplus_base_url": "https://api.gopluslabs.io/api/v1",
+        "goplus_api_key": "",
+        "label_api_url": "",
+        "label_api_key": "",
+        "profile_api_url": "",
+        "profile_api_key": "",
+    }
+    try:
+        with open(WEB3_RISK_CONFIG_FILE, "r", encoding="utf-8") as file:
+            loaded = json.load(file)
+        if isinstance(loaded, dict):
+            defaults.update({key: value for key, value in loaded.items() if key in defaults})
+    except (OSError, ValueError):
+        pass
+    return defaults
+
+
+def save_web3_risk_config(config):
+    with open(WEB3_RISK_CONFIG_FILE, "w", encoding="utf-8") as file:
+        json.dump(config, file, ensure_ascii=False, indent=2)
+    os.chmod(WEB3_RISK_CONFIG_FILE, 0o600)
+
+
+def load_ip_risk_config():
+    defaults = {"enabled": False, "provider": "IPQualityScore", "api_url": "", "api_key": ""}
+    try:
+        with open(IP_RISK_CONFIG_FILE, "r", encoding="utf-8") as file:
+            loaded = json.load(file)
+        if isinstance(loaded, dict):
+            defaults.update({key: value for key, value in loaded.items() if key in defaults})
+    except (OSError, ValueError):
+        pass
+    return defaults
+
+
+def save_ip_risk_config(config):
+    with open(IP_RISK_CONFIG_FILE, "w", encoding="utf-8") as file:
+        json.dump(config, file, ensure_ascii=False, indent=2)
+    os.chmod(IP_RISK_CONFIG_FILE, 0o600)
+
+
+def load_system_config():
+    defaults = {"payment_receiver": PAYMENT_RECEIVER}
+    try:
+        with open(SYSTEM_CONFIG_FILE, "r", encoding="utf-8") as file:
+            loaded = json.load(file)
+        if isinstance(loaded, dict) and EVM_ADDRESS_RE.fullmatch(str(loaded.get("payment_receiver", ""))):
+            defaults["payment_receiver"] = loaded["payment_receiver"]
+    except (OSError, ValueError):
+        pass
+    return defaults
+
+
+def save_system_config(config):
+    with open(SYSTEM_CONFIG_FILE, "w", encoding="utf-8") as file:
+        json.dump(config, file, ensure_ascii=False, indent=2)
+    os.chmod(SYSTEM_CONFIG_FILE, 0o600)
+
+
+def current_payment_receiver():
+    return load_system_config()["payment_receiver"]
+
+
+def ip_risk_snapshot(ip_value):
+    """Use a configured provider only; never infer geographic or proxy attributes locally."""
+    result = {"country": None, "region": None, "city": None, "isp": None, "asn": None, "ip_type": "待检测", "purity_score": None, "is_proxy": None, "is_vpn": None, "is_tor": None, "is_datacenter": None, "source": "未接入 IP 风控数据源", "checked_at": now(), "message": "未配置 IP 归属地与纯净度 API，系统只保存 IP 记录，不会推测归属地、网络类型或代理状态。"}
+    config = load_ip_risk_config()
+    key_required = config["provider"].strip().lower() not in ("ipwho.is", "ipwhois")
+    if not (config["enabled"] and config["api_url"] and (config["api_key"] or not key_required)):
+        return result
+    try:
+        url = config["api_url"].replace("{ip}", urllib.parse.quote(ip_value, safe=""))
+        separator = "&" if "?" in url else "?"
+        if "{key}" in url and config["api_key"]:
+            url = url.replace("{key}", urllib.parse.quote(config["api_key"], safe=""))
+        elif config["api_key"]:
+            url += separator + "key=" + urllib.parse.quote(config["api_key"], safe="")
+        request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "YuanShi-JinShouZhi/1.0"})
+        with urllib.request.urlopen(request, timeout=12) as response:
+            payload = json.load(response)
+        # Supports IPQualityScore-like response keys; use a custom adapter URL for another vendor.
+        if payload.get("success") is False:
+            raise RuntimeError(payload.get("message", "IP 数据源拒绝请求"))
+        security = payload.get("security") or {}
+        connection = payload.get("connection") or {}
+        proxy = bool(payload.get("proxy") or security.get("proxy"))
+        vpn = bool(payload.get("vpn") or security.get("vpn"))
+        tor = bool(payload.get("tor") or security.get("tor"))
+        datacenter = bool(payload.get("hosting") or payload.get("datacenter") or security.get("hosting"))
+        fraud_score = payload.get("fraud_score")
+        try:
+            purity = max(0, min(100, 100 - int(fraud_score))) if fraud_score is not None else None
+        except (TypeError, ValueError):
+            purity = None
+        ip_type = "Tor" if tor else ("VPN" if vpn else ("代理 IP" if proxy else ("数据中心 IP" if datacenter else "住宅 / 普通 IP")))
+        score_note = "已返回欺诈分并换算为 IP 纯净度。" if purity is not None else "该数据源未返回欺诈分，无法提供 IP 纯净度评分。"
+        return {"country": payload.get("country_code") or payload.get("country"), "region": payload.get("region"), "city": payload.get("city"), "isp": payload.get("ISP") or payload.get("isp") or connection.get("isp"), "asn": str(payload.get("ASN") or payload.get("asn") or connection.get("asn") or "") or None, "ip_type": ip_type, "purity_score": purity, "is_proxy": int(proxy), "is_vpn": int(vpn), "is_tor": int(tor), "is_datacenter": int(datacenter), "source": config["provider"], "checked_at": now(), "message": "已通过 %s 完成 IP 归属地与网络类型检测。%s" % (config["provider"], score_note)}
+    except Exception as exc:
+        detail = str(exc)
+        if "insufficient credits" in detail.lower() or "insufficient credit" in detail.lower():
+            detail = "IPQualityScore 账户查询额度不足，请充值、升级套餐或更换数据源。"
+        result.update({"source": "数据源异常", "message": "IP 风控数据源异常：%s" % detail})
+        return result
+
+
 def deliver_email(to, subject, body):
     config = load_smtp_config()
     if not (config["host"] and config["user"] and config["password"] and config["from"]):
@@ -365,9 +540,49 @@ def send_verification_email(email, code):
     )
 
 
-def user_identity(row):
+def mask_username(value):
+    value = str(value or "")
+    if len(value) <= 2:
+        return value[:1] + "*" * max(0, len(value) - 1)
+    return value[0] + "*" * max(6, len(value) - 2) + value[-1]
+
+
+def mask_email(value):
+    value = str(value or "")
+    if "@" not in value:
+        return mask_username(value)
+    local, domain = value.rsplit("@", 1)
+    if len(local) <= 2:
+        masked = local[:1] + "*" * max(0, len(local) - 1)
+    else:
+        masked = local[0] + "*" * max(5, len(local) - 2) + local[-1]
+    return masked + "@" + domain
+
+
+def mask_wallet_address(value):
+    value = str(value or "")
+    return value if len(value) <= 10 else value[:6] + "..." + value[-4:]
+
+
+def display_ip_for_viewer(value, viewer):
+    try:
+        parsed = ipaddress.ip_address(value)
+    except ValueError:
+        return "已脱敏"
+    if viewer and (viewer["role"] == "ADMIN" or user_display_label(viewer) in ("星舰会员", "旗舰 PRO")):
+        return str(parsed)
+    if parsed.version == 4:
+        return ".".join(str(parsed).split(".")[:2]) + ".xxx.xxx"
+    pieces = parsed.exploded.split(":")
+    return ":".join(pieces[:3]) + ":xxxx:xxxx:xxxx:xxxx:xxxx"
+
+
+def user_identity(row, viewer=None):
     email = row["email"] if "email" in row.keys() and row["email"] else "未绑定邮箱"
-    return '<div><strong>%s</strong><br><small class="muted">%s</small></div>' % (esc(row["username"]), esc(email))
+    full = bool(viewer and viewer["is_owner"])
+    username = row["username"] if full else mask_username(row["username"])
+    email = email if full else mask_email(email)
+    return '<div><strong>%s</strong><br><small class="muted">%s</small></div>' % (esc(username), esc(email))
 
 
 def can_query_local(user):
@@ -376,7 +591,7 @@ def can_query_local(user):
     status = user["membership_status"] if "membership_status" in user.keys() else "FREE"
     plan = user["membership_plan"] if "membership_plan" in user.keys() else "FREE"
     if status != "ACTIVE" or plan == "FREE":
-        return False, "当前账号尚未开通权限，请先进入权限中心开通。"
+        return False, "当前功能仅限星舰会员、旗舰 PRO 或管理员使用，请升级权限。"
     expires_at = user["membership_expires_at"] if "membership_expires_at" in user.keys() else None
     if expires_at and expires_at < now():
         return False, "会员已到期，请续费后继续查询。"
@@ -385,6 +600,87 @@ def can_query_local(user):
     if query_limit is not None and int(query_limit) >= 0 and int(query_used) >= int(query_limit):
         return False, "本月额度已使用完，请升级或续费。"
     return True, ""
+
+
+def viewer_can_export_full(user):
+    return bool(user and user["is_owner"])
+
+
+def check_address(value, check_type):
+    address = (value or "").strip()
+    if check_type == "evm":
+        return EVM_ADDRESS_RE.fullmatch(address) is not None, "ethereum"
+    if check_type == "solana":
+        return SOLANA_ADDRESS_RE.fullmatch(address) is not None, "solana"
+    if check_type == "tron":
+        return TRON_ADDRESS_RE.fullmatch(address) is not None, "tron"
+    if check_type == "btc":
+        return BTC_ADDRESS_RE.fullmatch(address) is not None, "bitcoin"
+    if check_type in ("wallet", "interaction"):
+        for candidate in ("evm", "solana", "tron", "btc"):
+            valid, chain = check_address(address, candidate)
+            if valid:
+                return True, chain
+        return False, ""
+    if check_type == "other":
+        return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_\-]{7,127}", address)), ""
+    return False, ""
+
+
+def icon_markup(icon_map, key):
+    item = icon_map.get(key, FALLBACK_ICON)
+    source = item.get("icon")
+    title = "%s%s" % (item["name"], "（图标待确认）" if not item.get("iconVerified") else "")
+    if source:
+        return '<img class="exchange-icon" src="%s" alt="%s" title="%s">' % (esc(source), esc(item["name"]), esc(title))
+    return '<span class="exchange-icon" title="%s">%s</span>' % (esc(title), esc(item.get("fallbackIcon", "?")))
+
+
+def rpc_call(url, method, params):
+    if not url:
+        raise RuntimeError("未接入实时数据源")
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8")
+    request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json", "User-Agent": "YuanShi-JinShouZhi/1.0"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        data = json.load(response)
+    if data.get("error"):
+        raise RuntimeError(data["error"].get("message", "数据源返回错误"))
+    return data.get("result")
+
+
+def live_wallet_snapshot(address, chain):
+    """Return only provider-backed public chain fields; unknown fields stay explicit."""
+    started = time.time()
+    base = {
+        "address": address, "chain": chain or "未知链", "addressType": "未知地址", "assets": [],
+        "totalValue": None, "transactionCount": None, "interactionCount": None, "lastTransactionAt": None,
+        "riskScore": None, "riskLevel": "未知", "riskTags": [], "riskReasons": [], "interactions": [],
+        "source": "未接入实时数据源", "updatedAt": now(), "durationMs": 0, "confidence": "低",
+        "isRealtime": False, "missingFields": ["地址标签", "风险标签", "代币余额", "实时价格", "交易次数", "交互明细"],
+        "status": "NOT_CONFIGURED", "message": "未配置已审核的链上节点或地址标签数据源，系统不会生成虚构余额、风险评分或交互记录。",
+    }
+    config = load_web3_risk_config()
+    evm_rpc_url = config["evm_rpc_url"] or EVM_RPC_URL
+    solana_rpc_url = config["solana_rpc_url"] or SOLANA_RPC_URL
+    try:
+        if chain == "ethereum":
+            if not evm_rpc_url:
+                return base
+            balance = rpc_call(evm_rpc_url, "eth_getBalance", [address, "latest"])
+            wei = int(balance, 16)
+            base.update({"assets": [{"symbol": "ETH", "balance": wei / 10 ** 18, "price": None, "share": None, "icon": "ethereum"}], "source": "EVM RPC", "isRealtime": True, "confidence": "中", "status": "PARTIAL", "message": "已获得原生币余额；代币、标签、风险与交互数据仍需接入对应数据源。", "missingFields": ["地址标签", "风险标签", "代币余额", "实时价格", "交易次数", "交互明细"]})
+        elif chain == "solana":
+            if not solana_rpc_url:
+                return base
+            result = rpc_call(solana_rpc_url, "getBalance", [address])
+            lamports = (result or {}).get("value")
+            if lamports is None:
+                raise RuntimeError("Solana 节点未返回余额")
+            base.update({"assets": [{"symbol": "SOL", "balance": int(lamports) / 10 ** 9, "price": None, "share": None, "icon": "solana"}], "source": "Solana RPC", "isRealtime": True, "confidence": "中", "status": "PARTIAL", "message": "已获得原生币余额；代币、标签、风险与交互数据仍需接入对应数据源。", "missingFields": ["地址标签", "风险标签", "代币余额", "实时价格", "交易次数", "交互明细"]})
+    except Exception as exc:
+        base.update({"status": "SOURCE_ERROR", "message": "实时数据源异常：%s" % str(exc), "source": "数据源异常"})
+    base["durationMs"] = int((time.time() - started) * 1000)
+    return base
 
 
 def user_display_label(user):
@@ -722,7 +1018,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 10p
 .exchange-name{display:inline-flex;align-items:center;gap:8px}.exchange-icon{--h:215;display:inline-grid;place-items:center;flex:0 0 auto;width:28px;height:28px;border-radius:9px;color:#fff;background:linear-gradient(135deg,hsl(var(--h) 72% 52%),hsl(var(--h) 72% 34%));font-size:10px;font-weight:850;letter-spacing:-.3px;box-shadow:inset 0 0 0 1px #fff3}
 .exchange-icon-img{display:block;object-fit:cover;background:#fff;border:1px solid #e3e8f0;padding:2px}
 .exchange-picker{position:relative}.exchange-picker>summary{list-style:none;display:flex;align-items:center;min-height:44px;padding:7px 38px 7px 11px;border:1px solid #cfd9e7;border-radius:9px;background:#fff;cursor:pointer;position:relative}.exchange-picker>summary::-webkit-details-marker{display:none}.exchange-picker>summary:after{content:"⌄";position:absolute;right:13px;font-size:18px;color:#66758a}.exchange-picker[open]{z-index:9999}.exchange-picker[open]>summary{border-color:#2457d6}.exchange-menu{position:absolute;z-index:9999;top:calc(100% + 8px);right:0;width:min(520px,88vw);padding:12px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:#111827;color:#f8fafc;box-shadow:0 28px 90px #000b}.exchange-search{margin-bottom:10px;color:#f8fafc;background:#1f2937;border-color:rgba(255,255,255,.12);font-weight:850}.exchange-list{max-height:min(520px,68vh);overflow:auto}.exchange-group>strong{display:block;position:sticky;top:0;padding:10px 11px;background:#1b2433;color:#9fb0c8;font-size:13px;font-weight:950;z-index:1}.exchange-option{display:flex;align-items:center;gap:13px;margin:1px 0;padding:10px 11px;border-radius:12px;cursor:pointer;font-weight:950;color:#f8fafc;letter-spacing:-.35px}.exchange-option span:last-child{color:#f8fafc;font-size:16px;font-weight:950;text-shadow:0 2px 12px #0008}.exchange-option:hover{background:rgba(255,255,255,.075)}.exchange-option input{width:auto;margin:0;accent-color:#3b82f6}.exchange-option input:checked~span:last-child{color:#f6d680;font-weight:950}
-.pager{display:flex;gap:7px;margin-top:15px}.pager a{padding:7px 11px;border:1px solid var(--line);border-radius:7px;background:#fff}.stat{font-size:34px;font-weight:850}.actions{display:flex;gap:8px;align-items:end}.inline{display:inline}
+.pager{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:15px}.pager a,.pager .on{display:inline-flex;align-items:center;justify-content:center;min-width:36px;padding:7px 11px;border:1px solid var(--line);border-radius:7px;background:rgba(255,255,255,.07);color:#d8e2f2}.pager a:hover{border-color:rgba(246,214,128,.46);background:rgba(246,214,128,.12);color:#fff}.pager .on{border-color:rgba(246,214,128,.52);background:rgba(246,214,128,.18);color:#f6d680;font-weight:850}.segments .seg{border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.065);color:#dbe6f6}.segments .seg.yes{border-color:rgba(74,222,128,.28);background:rgba(34,197,94,.13);color:#9af7c8}.segments .seg.no{border-color:rgba(251,113,133,.28);background:rgba(248,113,113,.13);color:#fecaca}.stat{font-size:34px;font-weight:850}.ip-intel-grid{grid-template-columns:repeat(4,minmax(0,1fr));align-items:start}.ip-intel-grid .col3{grid-column:span 1}.ip-intel-value{min-height:42px;margin-top:8px;color:#f2f6fd;font-size:16px;font-weight:800;line-height:1.55;overflow-wrap:anywhere;word-break:break-word}.ip-intel-score{font-size:24px;line-height:1.4;color:#f6d680}.actions{display:flex;gap:8px;align-items:end}.inline{display:inline}
 .market-terminal{padding:18px 18px 16px;background:radial-gradient(circle at 20% 0,rgba(246,214,128,.12),transparent 23rem),linear-gradient(145deg,rgba(10,22,38,.92),rgba(3,8,15,.96));border-color:rgba(246,214,128,.16)}
 .market-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.market-kicker{font:900 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.24em;color:#f6d680}.market-live{display:inline-flex;align-items:center;gap:7px;color:#78f6c8;font-size:12px;font-weight:900}.market-live:before{content:"";width:8px;height:8px;border-radius:50%;background:#34d399;box-shadow:0 0 16px #34d399;animation:pulse-dot 1.5s infinite}
 .market-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.market-tile{position:relative;min-height:178px;padding:18px;border:1px solid rgba(255,255,255,.10);border-radius:24px;background:linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018));overflow:hidden;transition:.2s ease}.market-tile:before{content:"";position:absolute;inset:0;background:linear-gradient(120deg,transparent,rgba(255,255,255,.08),transparent);transform:translateX(-120%);animation:scan-sheen 3.6s infinite}.market-tile:hover{transform:translateY(-3px);border-color:rgba(246,214,128,.36);box-shadow:0 24px 70px rgba(0,0,0,.28),0 0 32px rgba(246,214,128,.08)}
@@ -760,7 +1056,7 @@ body:before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;bac
 .terminal-font, .stat, .market-price, .risk-score, .metric-value{font-family:"JetBrains Mono","SFMono-Regular","Menlo","HarmonyOS Sans","Source Han Sans SC","PingFang SC",monospace}.logo,.market-kicker,.core-label,.hero-kicker{font-family:"Orbitron","JetBrains Mono","SFMono-Regular","HarmonyOS Sans","PingFang SC",sans-serif}.risk-disclaimer{border:1px solid rgba(246,214,128,.20);border-radius:18px;padding:14px 16px;background:linear-gradient(135deg,rgba(246,214,128,.08),rgba(255,255,255,.025));color:#d8cda9;font-size:13px;line-height:1.75}.trust-grid,.risk-dashboard{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.trust-card,.risk-panel{position:relative;border:1px solid rgba(255,255,255,.09);border-radius:22px;padding:18px;background:linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018));box-shadow:inset 0 1px 0 rgba(255,255,255,.06);overflow:hidden}.trust-card:after,.risk-panel:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 0,rgba(255,255,255,.035) 50%,transparent 100%);background-size:100% 9px;opacity:.28;pointer-events:none}.trust-card strong{display:block;margin-top:8px;font-size:28px;color:#f8fbff}.trust-card span,.risk-panel span{color:#8b9ab0;font-size:12px;font-weight:800}.risk-panel h3{margin:0 0 14px;font-size:17px;color:#f8fbff}.risk-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 0;color:#dce7f7}.risk-score{display:inline-flex;padding:6px 9px;border-radius:999px;font-weight:950}.risk-low{background:rgba(34,197,94,.14);color:#86efac}.risk-medium{background:rgba(246,214,128,.13);color:#f6d680}.risk-high{background:rgba(248,113,113,.14);color:#fecaca}.scan-progress{display:none;margin-top:16px;border:1px solid rgba(246,214,128,.16);border-radius:999px;background:rgba(0,0,0,.24);overflow:hidden}.scan-progress span{display:block;width:0;height:10px;background:linear-gradient(90deg,#f6d680,#34d399);box-shadow:0 0 18px rgba(246,214,128,.35);animation:scan-fill 1.35s ease forwards}@keyframes scan-fill{from{width:0}to{width:85%}}form.scanning .scan-progress{display:block}form.scanning button{pointer-events:none;opacity:.82}.market-detail{position:relative;z-index:1;display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:12px;color:#9badc4;font-size:11px;font-weight:800}.market-detail b{color:#e8f1ff}.market-mini{position:relative;z-index:1;margin-top:12px;width:100%;height:34px}.market-mini path{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.market-tile.up .market-mini path{stroke:#34d399;filter:drop-shadow(0 0 8px rgba(52,211,153,.55))}.market-tile.down .market-mini path{stroke:#fb7185;filter:drop-shadow(0 0 8px rgba(251,113,133,.45))}
 .core-query-card{padding:30px 32px}.core-query-card h2{margin-bottom:30px}.core-query-card .grid,.address-check-card .grid{row-gap:22px}.query-action-row{display:flex;align-items:flex-end;gap:16px;padding-top:4px}.address-check-card{margin-top:18px;margin-bottom:26px;border-color:rgba(246,214,128,.18)}.address-check-card h2{margin-bottom:22px}.trust-grid{margin:24px 0 26px}.risk-dashboard{margin:0 0 28px}.payment-panel{margin-top:22px}.plan-order-form{margin-top:20px;display:grid;gap:12px}.plan-order-form select{max-width:180px}.order-box{margin-top:22px;padding:18px;border:1px solid rgba(246,214,128,.16);border-radius:20px;background:rgba(255,255,255,.035)}.verify-form{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:end;margin-top:18px}.verify-form label{grid-column:1/-1}.verify-form input{min-width:0}
 @media(max-width:1180px){.market-dashboard{grid-template-columns:1fr}.market-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.market-tile{min-height:168px}}
-@media(max-width:850px){.layout{display:block}.side{position:static;height:auto;overflow:visible;padding:14px}.brandhead{margin-bottom:12px}.brandmark{width:42px;height:42px}.nav{display:flex;overflow:auto}.nav a{white-space:nowrap}.business{margin-top:12px;padding-top:10px}.business-list{display:flex;gap:8px;overflow-x:auto;padding-bottom:3px}.business-item{min-width:max-content;margin:0}.main{padding:16px}.col3,.col4,.col6,.col8{grid-column:span 12}.top{align-items:flex-start;gap:12px}.card{padding:16px}.hero{min-height:145px;padding:20px}.hero h2{font-size:22px}.market-dashboard{grid-template-columns:1fr}.market-panel{min-height:300px}.market-grid,.trust-grid,.risk-dashboard{grid-template-columns:1fr}.market-price{font-size:34px}.market-chart-price{font-size:28px}}
+@media(max-width:850px){.layout{display:block}.side{position:static;height:auto;overflow:visible;padding:14px}.brandhead{margin-bottom:12px}.brandmark{width:42px;height:42px}.nav{display:flex;overflow:auto}.nav a{white-space:nowrap}.business{margin-top:12px;padding-top:10px}.business-list{display:flex;gap:8px;overflow-x:auto;padding-bottom:3px}.business-item{min-width:max-content;margin:0}.main{padding:16px}.col3,.col4,.col6,.col8{grid-column:span 12}.ip-intel-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 14px}.ip-intel-grid .col3{grid-column:span 1}.ip-intel-grid .col12{grid-column:1/-1}.ip-intel-value{min-height:0;font-size:15px}.ip-intel-score{font-size:22px}.card{padding:16px}.hero{min-height:145px;padding:20px}.hero h2{font-size:22px}.market-dashboard{grid-template-columns:1fr}.market-panel{min-height:300px}.market-grid,.trust-grid,.risk-dashboard{grid-template-columns:1fr}.market-price{font-size:34px}.market-chart-price{font-size:28px}}
 @media(max-width:850px){.layout{grid-template-columns:1fr}.side{border-right:0}.main{padding:18px}.top h1{font-size:28px}.brandhead{border-radius:18px}.member-hero{grid-template-columns:1fr;min-height:auto}.hero-logo{justify-self:start;width:92px;height:92px}.plan-pro{transform:none}.plan-price{font-size:40px}.hero h2{font-size:30px}}
 """
 
@@ -1005,6 +1301,12 @@ class App(BaseHTTPRequestHandler):
             return self.delete_user()
         if path == "/settings/cmc-key":
             return self.save_cmc_key()
+        if path == "/settings/web3-risk":
+            return self.save_web3_risk()
+        if path == "/settings/ip-risk":
+            return self.save_ip_risk()
+        if path == "/settings/payment-receiver":
+            return self.save_payment_receiver()
         if path == "/settings/cmc-sync":
             return self.sync_cmc()
         if path == "/settings/smtp":
@@ -1169,29 +1471,35 @@ class App(BaseHTTPRequestHandler):
         message = query.get("message", [""])[0]
         flash = '<div class="flash">%s</div>' % esc(message) if message else ""
         with db() as conn:
-            if session["user"]["is_owner"]:
+            total_checks = conn.execute("SELECT COUNT(*) FROM ip_records").fetchone()[0] + conn.execute("SELECT COUNT(*) FROM wallet_checks").fetchone()[0]
+            wallet_total = conn.execute("SELECT COUNT(*) FROM wallet_checks").fetchone()[0]
+            high_risk = conn.execute("SELECT COUNT(*) FROM wallet_checks WHERE risk_score >= 70").fetchone()[0]
+            today = now()[:10]
+            new_today = conn.execute("SELECT COUNT(*) FROM ip_records WHERE created_at >= ?", (today,)).fetchone()[0] + conn.execute("SELECT COUNT(*) FROM wallet_checks WHERE created_at >= ?", (today,)).fetchone()[0]
+            if session["user"]["is_owner"] or session["user"]["role"] == "ADMIN":
                 recent = conn.execute("""SELECT r.*,u.username,u.email FROM ip_records r JOIN users u ON u.id=r.user_id ORDER BY r.last_seen_at DESC LIMIT 10""").fetchall()
             else:
                 recent = conn.execute("""SELECT r.*,u.username,u.email FROM ip_records r JOIN users u ON u.id=r.user_id WHERE r.user_id=? ORDER BY r.last_seen_at DESC LIMIT 10""", (session["user"]["id"],)).fetchall()
         rows = "".join("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
-            esc(r["full_ip"]), exchange_display(r["exchange"]), status_badge(r["last_similarity"]), user_identity(r), r["query_count"], esc(r["last_seen_at"])
+            esc(display_ip_for_viewer(r["full_ip"], session["user"])), exchange_display(r["exchange"]), status_badge(r["last_similarity"]), user_identity(r, session["user"]), r["query_count"], esc(r["last_seen_at"])
         ) for r in recent) or '<tr><td colspan="6" class="muted">暂无查询记录</td></tr>'
         content = flash + """<div class="hero"><div><span class="hero-kicker">GOLD FINGER · WEB3 RISK TERMINAL</span><h2>IP 风险检测核心工作台</h2></div></div>
         <div class="card core-query-card"><h2>开始 IP 风险检测</h2><form method="post" action="/query" id="risk-query-form"><input type="hidden" name="csrf" value="%s"><div class="grid">
         <div class="col8"><label>IPv4 地址</label><input name="ip" placeholder="例如：192.168.1.10" required></div><div class="col4"><label>交易所</label>%s</div>
         <div class="col12 query-action-row"><button id="risk-submit">启动扫描并自动入库</button><div class="scan-progress"><span></span></div></div></div></form></div>
-        <div class="card address-check-card"><h2>钱包 / 交互地址检测</h2><form method="post" action="/wallet-check"><input type="hidden" name="csrf" value="%s"><div class="grid">
-        <div class="col3"><label>检测类型</label><select name="check_type"><option value="wallet">钱包地址</option><option value="interaction">交互地址</option></select></div>
-        <div class="col7"><label>EVM 地址</label><input name="address" placeholder="例如：0x82a1...9A"></div>
-        <div class="col2 query-action-row"><button>开始检测</button></div></div></form></div>
-        <div class="grid trust-grid"><div class="trust-card"><span>检测 IP</span><strong>2,548,920+</strong></div><div class="trust-card"><span>分析钱包</span><strong>856,320+</strong></div><div class="trust-card"><span>风险地址</span><strong>42,891+</strong></div><div class="trust-card"><span>覆盖交易所</span><strong>50+</strong></div></div>
+        <div class="card address-check-card"><h2>钱包 / 交互地址检测</h2><p class="muted">链上公开数据与平台内部授权数据分开处理；钱包地址不能反查真实 IP。</p><form method="post" action="/wallet-check" id="address-check-form"><input type="hidden" name="csrf" value="%s"><div class="grid">
+        <div class="col3"><label>检测类型</label><select name="check_type" id="check-type">%s</select></div>
+        <div class="col7"><label id="address-label">钱包地址</label><input name="address" id="check-address" placeholder="请输入钱包地址" required></div>
+        <div class="col2 query-action-row"><button id="address-submit">开始检测</button></div></div></form></div>
+        <div class="grid trust-grid"><div class="trust-card"><span>总检测次数</span><strong>%s</strong></div><div class="trust-card"><span>分析钱包</span><strong>%s</strong></div><div class="trust-card"><span>风险地址</span><strong>%s</strong></div><div class="trust-card"><span>覆盖交易所</span><strong>10 CEX / 7 DEX</strong></div></div>
         <div class="risk-dashboard"><div class="risk-panel"><h3>AI 市场雷达</h3><div class="risk-row"><span>BTC</span><b>震荡</b></div><div class="risk-row"><span>ETH</span><b>弱势</b></div><div class="risk-row"><span>SOL</span><b>强势</b></div><div class="risk-row"><span>山寨风险</span><b class="risk-score risk-medium">中等</b></div></div>
-        <div class="risk-panel"><h3>风险监控中心</h3><div class="risk-row"><span>总检测</span><b>1,284</b></div><div class="risk-row"><span>异常</span><b>37</b></div><div class="risk-row"><span>高风险</span><b class="risk-score risk-high">6</b></div><div class="risk-row"><span>安全指数</span><b class="risk-score risk-low">94%%</b></div></div>
-        <div class="risk-panel"><h3>IP 女巫检测</h3><div class="risk-row"><span>192.xxx.xxx</span><b>China</b></div><div class="risk-row"><span>设备指纹</span><b>MacOS Chrome</b></div><div class="risk-row"><span>风险评分</span><b class="risk-score risk-high">Risk 82</b></div></div>
-        <div class="risk-panel"><h3>钱包画像</h3><div class="risk-row"><span>0x82...9A</span><b>124,000 USDT</b></div><div class="risk-row"><span>交互</span><b>DEX 35</b></div><div class="risk-row"><span>风险</span><b class="risk-score risk-low">低</b></div></div></div>
-        <div class="card"><h2>最近检测记录</h2><p class="muted">结果页已支持精确重复、相似度排序、历史用户、风险颜色标记；查询历史页支持筛选、分页和 CSV 导出。</p><div class="tablewrap"><table><thead><tr><th>IP</th><th>交易所</th><th>相似度</th><th>查询用户</th><th>次数</th><th>最近查询</th></tr></thead><tbody>%s</tbody></table></div></div>
-        <script>document.addEventListener("DOMContentLoaded",function(){var f=document.getElementById("risk-query-form");var b=document.getElementById("risk-submit");if(f&&b){f.addEventListener("submit",function(){f.classList.add("scanning");b.textContent="正在分析网络环境...";});}});</script>""" % (
-            session["csrf"], exchange_picker(), session["csrf"], rows
+        <div class="risk-panel"><h3>风险监控中心</h3><div class="risk-row"><span>总检测</span><b>%s</b></div><div class="risk-row"><span>今日新增风险</span><b>%s</b></div><div class="risk-row"><span>高风险</span><b class="risk-score risk-high">%s</b></div><div class="risk-row"><span>安全指数</span><b class="risk-score risk-low">暂无实时基线</b></div><p class="muted">大额转账、交易所异动、项目方异动、黑名单与女巫集群需接入风控规则库后统计。</p></div>
+        <div class="risk-panel"><h3>IP 女巫检测</h3><div class="risk-row"><span>授权 IP 记录</span><b>%s</b></div><div class="risk-row"><span>关联设备指纹</span><b>未采集</b></div><div class="risk-row"><span>代理 / VPN / Tor</span><b>待接入 IP 数据源</b></div><p class="muted">仅分析平台内部已授权的登录、设备与风控日志；链上钱包不能直接获取真实 IP。</p></div>
+        <div class="risk-panel"><h3>钱包画像</h3><div class="risk-row"><span>主要活跃链</span><b>按实时查询返回</b></div><div class="risk-row"><span>资产 / 持仓变化</span><b>待接入价格源</b></div><div class="risk-row"><span>女巫 / 工作室判断</span><b class="risk-score">待规则库</b></div><p class="muted">DEX/CEX 交互、NFT、空投、合约频率仅在对应数据源返回时展示。</p></div></div>
+        <div class="card"><h2>最近检测记录</h2><p class="muted">查询用户信息默认脱敏。仅总管理员可查看完整身份、完整钱包和完整日志；完整 CSV 导出也仅限总管理员。</p><div class="tablewrap"><table><thead><tr><th>IP</th><th>交易所</th><th>相似度</th><th>查询用户</th><th>次数</th><th>最近查询</th></tr></thead><tbody>%s</tbody></table></div></div>
+        <script>document.addEventListener("DOMContentLoaded",function(){var f=document.getElementById("risk-query-form"),b=document.getElementById("risk-submit"),af=document.getElementById("address-check-form"),t=document.getElementById("check-type"),a=document.getElementById("check-address"),l=document.getElementById("address-label"),ab=document.getElementById("address-submit"),types=%s;function sync(){var x=types[t.value];a.placeholder=x.placeholder;l.textContent=x.label;af.action=x.kind==="ip"?"/query":"/wallet-check";}if(f&&b)f.addEventListener("submit",function(){f.classList.add("scanning");b.textContent="正在分析网络环境...";});if(af&&t){sync();t.addEventListener("change",sync);af.addEventListener("submit",function(){ab.textContent="查询中...";ab.disabled=true;});}});</script>""" % (
+            session["csrf"], exchange_picker(), session["csrf"], "".join('<option value="%s">%s</option>' % (esc(key), esc(item["label"])) for key, item in CHECK_TYPES.items()), total_checks, wallet_total, high_risk,
+            total_checks, new_today, high_risk, total_checks, rows, json.dumps(CHECK_TYPES, ensure_ascii=False)
         )
         self.send_html(self.page(session, "IP风险检测", content, "home"))
 
@@ -1532,23 +1840,28 @@ class App(BaseHTTPRequestHandler):
                     return self.send_html(self.page(session, "设备已绑定", '<div class="card"><h2>账号已绑定其它设备</h2><p class="muted">请联系客服处理设备解绑或重新绑定。</p></div>'), 403)
                 if not bound:
                     conn.execute("UPDATE users SET bound_device_token=?,updated_at=? WHERE id=?", (device_token, now(), session["user"]["id"]))
-        raw_ip = form.get("ip", "").strip()
-        exchange = form.get("exchange", "")
+        raw_ip = form.get("ip", form.get("address", "")).strip()
+        exchange = form.get("exchange", "其他")
         try:
             parsed = ipaddress.ip_address(raw_ip)
-            if parsed.version != 4 or str(parsed) != raw_ip:
+            if str(parsed) != raw_ip:
                 raise ValueError()
         except ValueError:
-            return self.redirect("/?message=" + urllib.parse.quote("请输入合法的 IPv4 地址。"))
+            return self.redirect("/?message=" + urllib.parse.quote("请输入合法的 IPv4 / IPv6 地址。"))
         if exchange not in EXCHANGES:
             return self.redirect("/?message=" + urllib.parse.quote("请选择有效的交易所。"))
-        seg = [int(x) for x in raw_ip.split(".")]
+        is_ipv4 = parsed.version == 4
+        seg = [int(x) for x in raw_ip.split(".")] if is_ipv4 else [0, 0, 0, 0]
+        ip_risk = ip_risk_snapshot(raw_ip)
         with db() as conn:
             history = conn.execute("""SELECT r.*,u.username,u.email FROM ip_records r JOIN users u ON u.id=r.user_id""").fetchall()
             compared = []
-            for row in history:
-                score, matches = similarity(seg, row)
-                compared.append((score, row["last_seen_at"], row, matches))
+            if is_ipv4:
+                for row in history:
+                    if ":" in row["full_ip"]:
+                        continue
+                    score, matches = similarity(seg, row)
+                    compared.append((score, row["last_seen_at"], row, matches))
             compared.sort(key=lambda x: (x[0], x[1]), reverse=True)
             top = compared[:20]
             exact = [item for item in compared if item[0] == 100]
@@ -1556,29 +1869,30 @@ class App(BaseHTTPRequestHandler):
             existing = conn.execute("SELECT id FROM ip_records WHERE full_ip=? AND exchange=?", (raw_ip, exchange)).fetchone()
             ts = now()
             if existing:
-                conn.execute("UPDATE ip_records SET query_count=query_count+1,last_seen_at=?,last_similarity=?,updated_at=? WHERE id=?", (ts, highest, ts, existing["id"]))
+                conn.execute("""UPDATE ip_records SET query_count=query_count+1,last_seen_at=?,last_similarity=?,country=?,region=?,city=?,isp=?,asn=?,ip_type=?,purity_score=?,is_proxy=?,is_vpn=?,is_tor=?,is_datacenter=?,ip_source=?,ip_checked_at=?,updated_at=? WHERE id=?""", (ts, highest, ip_risk["country"], ip_risk["region"], ip_risk["city"], ip_risk["isp"], ip_risk["asn"], ip_risk["ip_type"], ip_risk["purity_score"], ip_risk["is_proxy"], ip_risk["is_vpn"], ip_risk["is_tor"], ip_risk["is_datacenter"], ip_risk["source"], ip_risk["checked_at"], ts, existing["id"]))
                 record_id = existing["id"]
             else:
-                cur = conn.execute("""INSERT INTO ip_records(full_ip,segment_a,segment_b,segment_c,segment_d,exchange,user_id,query_count,last_similarity,first_seen_at,last_seen_at,created_at,updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (raw_ip, *seg, exchange, session["user"]["id"], 1, highest, ts, ts, ts, ts))
+                cur = conn.execute("""INSERT INTO ip_records(full_ip,segment_a,segment_b,segment_c,segment_d,exchange,user_id,query_count,last_similarity,first_seen_at,last_seen_at,created_at,updated_at,country,region,city,isp,asn,ip_type,purity_score,is_proxy,is_vpn,is_tor,is_datacenter,ip_source,ip_checked_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (raw_ip, *seg, exchange, session["user"]["id"], 1, highest, ts, ts, ts, ts, ip_risk["country"], ip_risk["region"], ip_risk["city"], ip_risk["isp"], ip_risk["asn"], ip_risk["ip_type"], ip_risk["purity_score"], ip_risk["is_proxy"], ip_risk["is_vpn"], ip_risk["is_tor"], ip_risk["is_datacenter"], ip_risk["source"], ip_risk["checked_at"]))
                 record_id = cur.lastrowid
             if session["user"]["role"] != "ADMIN":
                 limit_value = session["user"]["query_limit"] if "query_limit" in session["user"].keys() else 0
                 if int(limit_value or 0) >= 0:
                     conn.execute("UPDATE users SET query_used=query_used+1,updated_at=? WHERE id=?", (ts, session["user"]["id"]))
-            log_action(conn, session["user"]["id"], "QUERY_IP", "IP_RECORD", record_id, json.dumps({"ip": raw_ip, "exchange": exchange, "similarity": highest}, ensure_ascii=False))
+            log_action(conn, session["user"]["id"], "QUERY_IP", "IP_RECORD", record_id, json.dumps({"ip": raw_ip, "exchange": exchange, "similarity": highest, "ip_source": ip_risk["source"]}, ensure_ascii=False))
         best_matches = top[0][3] if top else [False] * 4
         segments_html = "".join('<span class="seg %s">%s = %s · %s</span>' % (
             "yes" if best_matches[i] else "no", "ABCD"[i], seg[i], "匹配" if best_matches[i] else "不匹配"
-        ) for i in range(4))
+        ) for i in range(4)) if is_ipv4 else '<span class="seg">IPv6 当前支持格式校验与精确记录；分段相似分析仅适用于 IPv4。</span>'
         rows = "".join("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
-            esc(item[2]["full_ip"]), status_badge(item[0]), exchange_display(item[2]["exchange"]),
-            user_identity(item[2]), esc(item[2]["first_seen_at"]), esc(item[2]["last_seen_at"])
+            esc(display_ip_for_viewer(item[2]["full_ip"], session["user"])), status_badge(item[0]), exchange_display(item[2]["exchange"]),
+            user_identity(item[2], session["user"]), esc(item[2]["first_seen_at"]), esc(item[2]["last_seen_at"])
         ) for item in top) or '<tr><td colspan="6" class="muted">这是第一条记录，未发现历史相似 IP。</td></tr>'
         exact_text = "是，共找到 %d 条完整 IP 记录" % len(exact) if exact else "否"
         content = """<div class="card"><div class="grid"><div class="col3"><div class="muted">当前查询 IP</div><div class="stat">%s</div></div><div class="col3"><div class="muted">交易所</div><div style="margin-top:10px">%s</div></div><div class="col3"><div class="muted">最高相似度</div><div class="stat">%s%%</div></div><div class="col3"><div class="muted">精确重复</div><div style="margin-top:10px">%s</div></div><div class="col12"><div class="segments">%s</div></div></div></div>
         <div class="card"><h2>最相似历史记录（最多 20 条）</h2><div class="tablewrap"><table><thead><tr><th>历史 IP</th><th>相似度</th><th>交易所</th><th>录入用户</th><th>首次录入</th><th>最近查询</th></tr></thead><tbody>%s</tbody></table></div></div>
-        <a class="btn secondary" href="/">返回继续查询</a>""" % (esc(raw_ip), exchange_display(exchange), highest, esc(exact_text), segments_html, rows)
+        <div class="card"><h2>IP 归属地与纯净度</h2><div class="grid ip-intel-grid"><div class="col3"><div class="muted">国家 / 地区 / 城市</div><div class="ip-intel-value">%s / %s / %s</div></div><div class="col3"><div class="muted">ISP / ASN</div><div class="ip-intel-value">%s / %s</div></div><div class="col3"><div class="muted">IP 类型</div><div class="ip-intel-value">%s</div></div><div class="col3"><div class="muted">IP 纯净度</div><div class="ip-intel-value ip-intel-score">%s</div></div><div class="col12"><div class="segments"><span class="seg">代理：%s</span><span class="seg">VPN：%s</span><span class="seg">Tor：%s</span><span class="seg">数据中心：%s</span><span class="seg">来源：%s</span><span class="seg">检测时间：%s</span></div><p class="muted">%s</p></div></div></div>
+        <div class="card"><h2>IP 女巫关联数据</h2><p class="muted">平台内部授权日志可用于后续关联设备指纹、浏览器指纹、关联账号、钱包和邮箱。链上公开数据不能反向取得钱包真实 IP；缺失字段不会以推测结果展示。</p></div><a class="btn secondary" href="/">返回继续查询</a>""" % (esc(display_ip_for_viewer(raw_ip, session["user"])), exchange_display(exchange), highest, esc(exact_text), segments_html, rows, esc(ip_risk["country"] or "待检测"), esc(ip_risk["region"] or "-"), esc(ip_risk["city"] or "-"), esc(ip_risk["isp"] or "待检测"), esc(ip_risk["asn"] or "-"), esc(ip_risk["ip_type"]), esc(str(ip_risk["purity_score"]) + "/100" if ip_risk["purity_score"] is not None else ("数据源未提供评分" if ip_risk["source"] not in ("未接入 IP 风控数据源", "数据源异常") else "待检测")), "是" if ip_risk["is_proxy"] else ("否" if ip_risk["is_proxy"] is not None else "待检测"), "是" if ip_risk["is_vpn"] else ("否" if ip_risk["is_vpn"] is not None else "待检测"), "是" if ip_risk["is_tor"] else ("否" if ip_risk["is_tor"] is not None else "待检测"), "是" if ip_risk["is_datacenter"] else ("否" if ip_risk["is_datacenter"] is not None else "待检测"), esc(ip_risk["source"]), esc(ip_risk["checked_at"]), esc(ip_risk["message"]))
         self.send_html(self.page(session, "查询结果", content, "home"))
 
     def wallet_check(self):
@@ -1594,43 +1908,25 @@ class App(BaseHTTPRequestHandler):
             return self.send_html(self.page(session, "需要权限", content, "membership"), 403)
         address = form.get("address", "").strip()
         check_type = form.get("check_type", "wallet")
-        if check_type not in ("wallet", "interaction"):
+        if check_type not in CHECK_TYPES or CHECK_TYPES[check_type]["kind"] == "ip":
             check_type = "wallet"
-        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", address):
-            return self.redirect("/?message=" + urllib.parse.quote("请输入合法的钱包地址或交互地址。"))
-        lowered = address.lower()
-        entropy = int(hashlib.sha256(lowered.encode("utf-8")).hexdigest()[:4], 16)
-        risk_score = 18 + (entropy % 73)
-        risk_label = "低" if risk_score < 45 else ("中" if risk_score < 72 else "高")
-        interactions = 12 + (entropy % 120)
-        protocols = ["DEX", "CEX", "Bridge", "NFT", "Lending"]
-        result = {
-            "risk": risk_label,
-            "interactions": interactions,
-            "protocol": protocols[entropy % len(protocols)],
-            "note": "本地轻量画像：用于业务辅助筛查，不替代链上审计。",
-        }
+        valid, chain = check_address(address, check_type)
+        if not valid:
+            return self.redirect("/?message=" + urllib.parse.quote(CHECK_TYPES[check_type]["placeholder"]))
+        snapshot = live_wallet_snapshot(address, chain)
         ts = now()
         with db() as conn:
             cur = conn.execute(
                 "INSERT INTO wallet_checks(address,check_type,user_id,risk_score,result,created_at) VALUES(?,?,?,?,?,?)",
-                (address, check_type, session["user"]["id"], risk_score, json.dumps(result, ensure_ascii=False), ts),
+                (address, check_type, session["user"]["id"], int(snapshot["riskScore"] or 0), json.dumps(snapshot, ensure_ascii=False), ts),
             )
-            log_action(conn, session["user"]["id"], "WALLET_CHECK", "WALLET", cur.lastrowid, json.dumps({"address": address, "type": check_type, "risk": risk_score}, ensure_ascii=False))
-        content = """<div class="card"><h2>%s检测结果</h2><div class="grid">
-        <div class="col6"><div class="muted">检测地址</div><div class="stat" style="font-size:24px;word-break:break-all">%s</div></div>
-        <div class="col2"><div class="muted">风险评分</div><div class="stat">%s</div></div>
-        <div class="col2"><div class="muted">风险等级</div><div style="margin-top:10px"><span class="risk-score %s">%s</span></div></div>
-        <div class="col2"><div class="muted">交互次数</div><div class="stat">%s</div></div>
-        <div class="col12"><div class="segments"><span class="seg yes">主要协议：%s</span><span class="seg">画像来源：本地风控模型</span><span class="seg no">仅供风控参考</span></div></div>
-        </div></div><a class="btn secondary" href="/">返回继续检测</a>""" % (
-            "钱包地址" if check_type == "wallet" else "交互地址",
-            esc(address),
-            risk_score,
-            "risk-low" if risk_score < 45 else ("risk-medium" if risk_score < 72 else "risk-high"),
-            risk_label,
-            interactions,
-            esc(result["protocol"]),
+            log_action(conn, session["user"]["id"], "WALLET_CHECK", "WALLET", cur.lastrowid, json.dumps({"address": address, "type": check_type, "source": snapshot["source"], "status": snapshot["status"]}, ensure_ascii=False))
+        assets = "".join('<tr><td>%s %s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (icon_markup(CHAIN_ICON_MAP, item.get("icon", "")), esc(item["symbol"]), esc(item["balance"]), esc(item.get("price") if item.get("price") is not None else "待接入"), esc(item.get("share") if item.get("share") is not None else "待计算")) for item in snapshot["assets"]) or '<tr><td colspan="4" class="muted">暂无可验证资产数据</td></tr>'
+        missing = "、".join(snapshot["missingFields"])
+        content = """<div class="card"><h2>%s</h2><div class="grid"><div class="col6"><div class="muted">钱包地址 / 所属链</div><div class="stat" style="font-size:22px;word-break:break-all">%s<br><small>%s %s</small></div></div><div class="col2"><div class="muted">地址类型</div><div class="stat">%s</div></div><div class="col2"><div class="muted">风险评分</div><div class="stat">%s</div></div><div class="col2"><div class="muted">风险等级</div><div class="stat">%s</div></div><div class="col12"><div class="segments"><span class="seg">数据来源：%s</span><span class="seg">更新时间：%s</span><span class="seg">耗时：%sms</span><span class="seg">可信度：%s</span><span class="seg">%s</span></div></div></div></div>
+        <div class="card"><h2>资产与钱包画像</h2><p class="muted">总资产估值：%s；持仓价格、资产占比、交易次数、CEX/DEX/NFT/空投/合约活跃度、钱包年龄、批量注册、工作室与女巫判断，均仅在真实数据源可用时显示。</p><div class="tablewrap"><table><thead><tr><th>币种</th><th>余额</th><th>实时价格</th><th>资产占比</th></tr></thead><tbody>%s</tbody></table></div></div>
+        <div class="card"><h2>钱包交互地址分析</h2><p class="muted">交互地址、链、类型、CEX/DEX、风险、项目方、次数、金额、首次/最近交互及风险标签需要链上索引或授权标签库。当前状态：%s</p><p class="muted">交互列表支持风险/链/CEX-DEX 筛选、次数/金额排序、分页与 CSV 导出；在数据源未接入前不生成虚构列表。缺失字段：%s。</p></div><a class="btn secondary" href="/">返回继续检测</a>""" % (
+            esc(CHECK_TYPES[check_type]["label"] + "结果"), esc(address), icon_markup(CHAIN_ICON_MAP, chain), esc((CHAIN_ICON_MAP.get(chain) or FALLBACK_ICON)["name"]), esc(snapshot["addressType"]), esc(snapshot["riskScore"] if snapshot["riskScore"] is not None else "待接入"), esc(snapshot["riskLevel"]), esc(snapshot["source"]), esc(snapshot["updatedAt"]), snapshot["durationMs"], esc(snapshot["confidence"]), "实时数据" if snapshot["isRealtime"] else "非实时 / 未配置", esc(snapshot["totalValue"] if snapshot["totalValue"] is not None else "待接入"), assets, esc(snapshot["message"]), esc(missing)
         )
         self.send_html(self.page(session, "地址检测结果", content, "home"))
 
@@ -1651,7 +1947,7 @@ class App(BaseHTTPRequestHandler):
         with db() as conn:
             conn.execute(
                 "INSERT INTO membership_orders(order_no,user_id,plan,token,amount,receiver,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (order_no, session["user"]["id"], plan, token, config["price"], PAYMENT_RECEIVER, "PENDING", ts, ts),
+                (order_no, session["user"]["id"], plan, token, config["price"], current_payment_receiver(), "PENDING", ts, ts),
             )
             log_action(conn, session["user"]["id"], "CREATE_ORDER", "MEMBERSHIP_ORDER", order_no, json.dumps({"plan": plan, "token": token, "amount": config["price"]}, ensure_ascii=False))
         self.redirect("/membership?order=" + urllib.parse.quote(order_no) + "#payment")
@@ -1737,7 +2033,7 @@ class App(BaseHTTPRequestHandler):
         %s
         <p>如付款遇到问题，请联系：产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>。</p>
         <p class="muted">系统会自动核对 Token、网络、金额、收款地址和交易 Hash；验证成功后立即开通对应会员权益。</p></div>""" % (
-            esc(current_plan), esc(current_expiry), plan_html, PAYMENT_RECEIVER, verify_html
+            esc(current_plan), esc(current_expiry), plan_html, current_payment_receiver(), verify_html
         )
         self.send_html(self.page(session, "权限中心", content, "membership"))
 
@@ -1765,7 +2061,7 @@ class App(BaseHTTPRequestHandler):
             page = max(1, int(query.get("page", ["1"])[0]))
         except ValueError:
             page = 1
-        if not session["user"]["is_owner"]:
+        if not session["user"]["is_owner"] and session["user"]["role"] != "ADMIN":
             if where:
                 where += " AND r.user_id = ?"
             else:
@@ -1776,21 +2072,28 @@ class App(BaseHTTPRequestHandler):
             records = conn.execute("SELECT r.*,u.username,u.email FROM ip_records r JOIN users u ON u.id=r.user_id" + where + " ORDER BY r.last_seen_at DESC LIMIT 20 OFFSET ?", params + [(page - 1) * 20]).fetchall()
         delete = lambda r: ('<form class="inline" method="post" action="/history/delete"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="id" value="%s"><button class="danger">删除</button></form>' % (session["csrf"], r["id"])) if session["user"]["is_owner"] else ""
         rows = "".join("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
-            esc(r["full_ip"]), exchange_display(r["exchange"]), user_identity(r), status_badge(r["last_similarity"]), r["query_count"], esc(r["last_seen_at"]), delete(r)
+            esc(display_ip_for_viewer(r["full_ip"], session["user"])), exchange_display(r["exchange"]), user_identity(r, session["user"]), status_badge(r["last_similarity"]), r["query_count"], esc(r["last_seen_at"]), delete(r)
         ) for r in records) or '<tr><td colspan="7" class="muted">没有符合条件的记录</td></tr>'
         q = {k: v[-1] for k, v in query.items() if k != "page"}
         pages = max(1, (total + 19) // 20)
-        pager = "".join('<a href="/history?%s">%s</a>' % (urllib.parse.urlencode(dict(q, page=i)), i) for i in range(max(1, page - 2), min(pages, page + 2) + 1))
+        pager_links = []
+        if pages > 1:
+            for i in range(max(1, page - 2), min(pages, page + 2) + 1):
+                if i == page:
+                    pager_links.append('<span class="on" aria-current="page">%s</span>' % i)
+                else:
+                    pager_links.append('<a href="/history?%s">%s</a>' % (urllib.parse.urlencode(dict(q, page=i)), i))
+        pager = '<div class="pager">%s</div>' % "".join(pager_links) if pager_links else ""
         val = lambda k: esc(query.get(k, [""])[0])
         content = """<div class="card"><form method="get" action="/history"><div class="grid">
         <div class="col3"><label>完整 IP</label><input name="ip" value="%s"></div><div class="col3"><label>A 段</label><input name="a" value="%s"></div><div class="col3"><label>B 段</label><input name="b" value="%s"></div><div class="col3"><label>C 段</label><input name="c" value="%s"></div>
         <div class="col3"><label>D 段</label><input name="d" value="%s"></div><div class="col3"><label>交易所</label>%s</div><div class="col3"><label>查询用户</label><input name="user" value="%s"></div><div class="col3"><label>相似度</label><select name="similarity"><option value="">全部</option>%s</select></div>
-        <div class="col3"><label>开始日期</label><input type="date" name="from" value="%s"></div><div class="col3"><label>结束日期</label><input type="date" name="to" value="%s"></div><div class="col6 actions"><button>筛选</button><a class="btn secondary" href="/history">清空</a><a class="btn secondary" href="/history/export?%s">导出 CSV</a></div>
-        </div></form></div><div class="card"><h2>共 %s 条记录</h2><div class="tablewrap"><table><thead><tr><th>IP</th><th>交易所</th><th>用户</th><th>相似度</th><th>次数</th><th>最近查询</th><th></th></tr></thead><tbody>%s</tbody></table></div><div class="pager">%s</div></div>""" % (
+        <div class="col3"><label>开始日期</label><input type="date" name="from" value="%s"></div><div class="col3"><label>结束日期</label><input type="date" name="to" value="%s"></div><div class="col6 actions"><button>筛选</button><a class="btn secondary" href="/history">清空</a>%s</div>
+        </div></form></div><div class="card"><h2>共 %s 条记录</h2><div class="tablewrap"><table><thead><tr><th>IP</th><th>交易所</th><th>用户</th><th>相似度</th><th>次数</th><th>最近查询</th><th></th></tr></thead><tbody>%s</tbody></table></div>%s</div>""" % (
             val("ip"), val("a"), val("b"), val("c"), val("d"),
             exchange_picker(query.get("exchange", [""])[0], allow_all=True),
             val("user"), "".join('<option value="%s" %s>%s%%</option>' % (s, "selected" if val("similarity") == str(s) else "", s) for s in [100,75,50,25,0]),
-            val("from"), val("to"), urllib.parse.urlencode(q), total, rows, pager
+            val("from"), val("to"), '<a class="btn secondary" href="/history/export?%s">导出完整 CSV</a>' % urllib.parse.urlencode(q) if viewer_can_export_full(session["user"]) else '<span class="muted">完整 CSV 导出仅限总管理员</span>', total, rows, pager
         )
         self.send_html(self.page(session, "查询历史", content, "history"))
 
@@ -1798,13 +2101,9 @@ class App(BaseHTTPRequestHandler):
         session = self.require_user()
         if not session:
             return
+        if not viewer_can_export_full(session["user"]):
+            return self.send_html(self.page(session, "无权导出", '<div class="card"><h2>无权导出完整隐私数据</h2><p class="muted">完整用户名、邮箱、钱包与 IP 查询日志仅限总管理员导出。</p></div>', "history"), 403)
         where, params = self.history_filters(query)
-        if not session["user"]["is_owner"]:
-            if where:
-                where += " AND r.user_id = ?"
-            else:
-                where = " WHERE r.user_id = ?"
-            params.append(session["user"]["id"])
         with db() as conn:
             records = conn.execute("SELECT r.*,u.username,u.email FROM ip_records r JOIN users u ON u.id=r.user_id" + where + " ORDER BY r.last_seen_at DESC LIMIT 10000", params).fetchall()
             log_action(conn, session["user"]["id"], "EXPORT_CSV", "IP_RECORD", detail="导出 %d 条" % len(records))
@@ -2098,9 +2397,94 @@ class App(BaseHTTPRequestHandler):
             session["csrf"],
             "" if smtp_ready else "disabled",
         )
+        web3_cfg = load_web3_risk_config()
+        web3_card = """<div class="card"><h2>第三方 Web3 风控与钱包画像 API</h2>
+        <p>推荐地址安全源：<strong>GoPlus Security</strong>。它适合先接入基础地址安全、恶意/钓鱼合约与代币风险信息；RPC 负责真实余额。更完整的 CEX 标签、资金追踪、制裁与 AML 风险可在下方接入商业标签库。</p>
+        <p class="muted">所有接口仅由服务端调用。密钥保存到 <code>local_data/web3_risk.json</code>（权限 600），保存后不会在后台回显明文、不会写入操作日志或 GitHub。</p>
+        <form method="post" action="/settings/web3-risk"><input type="hidden" name="csrf" value="%s"><div class="grid">
+        <div class="col6"><label>EVM RPC URL</label><input name="evm_rpc_url" value="%s" placeholder="https://eth-mainnet.g.alchemy.com/v2/..."><p class="hint">用于 EVM 原生币余额。推荐 Alchemy、Infura、QuickNode 或自建节点。</p></div>
+        <div class="col6"><label>Solana RPC URL</label><input name="solana_rpc_url" value="%s" placeholder="https://api.mainnet-beta.solana.com"><p class="hint">用于 SOL 原生币余额。推荐 Helius、QuickNode 或自建节点。</p></div>
+        <div class="col4"><label>启用 GoPlus 地址安全</label><select name="goplus_enabled"><option value="0"%s>未启用</option><option value="1"%s>启用</option></select></div>
+        <div class="col8"><label>GoPlus API Base URL</label><input name="goplus_base_url" value="%s" placeholder="https://api.gopluslabs.io/api/v1"></div>
+        <div class="col12"><label>GoPlus API Key（如套餐要求）</label><input name="goplus_api_key" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥；免费接口通常无需填写"><p class="hint">建议先使用 GoPlus 的免费/低门槛地址安全能力；具体限额、链支持和授权以供应商当前文档为准。</p></div>
+        <div class="col6"><label>地址标签 / AML API URL</label><input name="label_api_url" value="%s" placeholder="例如已采购的 AML、CEX/DEX 地址标签 API 地址"></div>
+        <div class="col6"><label>地址标签 / AML API Key</label><input name="label_api_key" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥"></div>
+        <div class="col6"><label>钱包画像 API URL</label><input name="profile_api_url" value="%s" placeholder="交易、持仓、NFT、空投与交互索引 API 地址"></div>
+        <div class="col6"><label>钱包画像 API Key</label><input name="profile_api_key" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥"></div>
+        <div class="col12"><button>保存 Web3 风控配置</button></div></div></form></div>""" % (
+            session["csrf"], esc(web3_cfg["evm_rpc_url"]), esc(web3_cfg["solana_rpc_url"]),
+            "" if web3_cfg["goplus_enabled"] else " selected", " selected" if web3_cfg["goplus_enabled"] else "",
+            esc(web3_cfg["goplus_base_url"]), esc(web3_cfg["label_api_url"]), esc(web3_cfg["profile_api_url"]),
+        )
+        ip_cfg = load_ip_risk_config()
+        ip_card = """<div class="card"><h2>IP 归属地与纯净度检测 API</h2><p>推荐 <strong>IPQualityScore</strong>：可返回国家/地区/城市、ISP、ASN、代理、VPN、Tor、数据中心与欺诈分。每次 IP 入库前会调用已启用的数据源，并保存来源和检测时间。</p><p class="muted">接口 URL 支持 <code>{ip}</code> 和 <code>{key}</code> 占位符；如果没有 <code>{key}</code>，系统会在请求参数中添加 <code>key</code>。密钥仅保存于 <code>local_data/ip_risk.json</code>（权限 600），不回显、不记录到日志。</p><p class="hint">使用 <code>ipwho.is</code> 可免费查询归属地、ISP、ASN 与 VPN/代理等基础属性，但它不提供欺诈分，因此页面会显示“数据源未提供评分”；要得到 0-100 的纯净度，请配置 IPQualityScore 或其他包含欺诈评分的数据源。</p><form method="post" action="/settings/ip-risk"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col3"><label>启用检测</label><select name="enabled"><option value="0"%s>未启用</option><option value="1"%s>启用</option></select></div><div class="col3"><label>供应商名称</label><input name="provider" value="%s" placeholder="IPQualityScore"></div><div class="col6"><label>API URL</label><input name="api_url" value="%s" placeholder="https://.../{key}/{ip}"></div><div class="col12"><label>API Key</label><input name="api_key" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥"><p class="hint">未配置或调用失败时，系统会明确保存为“待检测/数据源异常”，不会伪造归属地或 IP 纯净度。</p></div><div class="col12"><button>保存 IP 风控配置</button></div></div></form></div>""" % (session["csrf"], "" if ip_cfg["enabled"] else " selected", " selected" if ip_cfg["enabled"] else "", esc(ip_cfg["provider"]), esc(ip_cfg["api_url"]))
+        system_cfg = load_system_config()
+        payment_card = """<div class="card"><h2>会员收款地址</h2><p>新订单会使用当前配置的 BSC / BEP20 收款地址，并将地址快照写入订单；修改地址不会影响已经生成订单的自动核验。</p><form method="post" action="/settings/payment-receiver"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col9"><label>BEP20 收款地址</label><input name="payment_receiver" value="%s" pattern="0x[a-fA-F0-9]{40}" spellcheck="false" required><p class="hint">仅接受 0x 开头的 42 位 EVM 地址。请确认该地址可接收 BSC 上的 USDT / USDC。</p></div><div class="col3 query-action-row"><button>更新收款地址</button></div></div></form></div>""" % (session["csrf"], esc(system_cfg["payment_receiver"]))
         content = flash + """<div class="grid"><div class="card col4"><div class="muted">用户数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">IP 记录数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">操作日志数</div><div class="stat">%s</div></div></div>
-        %s%s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, smtp_card, cmc_card)
+        %s%s%s%s%s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, payment_card, ip_card, web3_card, smtp_card, cmc_card)
         self.send_html(self.page(session, "系统设置", content, "settings"))
+
+    def save_web3_risk(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form) or not session["user"]["is_owner"]:
+            return self.send_html("Forbidden", 403)
+        current = load_web3_risk_config()
+        config = {}
+        for key in ("evm_rpc_url", "solana_rpc_url", "goplus_base_url", "label_api_url", "profile_api_url"):
+            value = form.get(key, "").strip()
+            if value and (not value.startswith("https://") or len(value) > 500):
+                return self.redirect("/settings?message=" + urllib.parse.quote("接口地址必须是有效的 HTTPS URL。"))
+            config[key] = value
+        config["goplus_enabled"] = form.get("goplus_enabled") == "1"
+        for key in ("goplus_api_key", "label_api_key", "profile_api_key"):
+            supplied = form.get(key, "").strip()
+            if len(supplied) > 500:
+                return self.redirect("/settings?message=" + urllib.parse.quote("API Key 长度不正确。"))
+            config[key] = supplied or current.get(key, "")
+        if not config["goplus_base_url"]:
+            config["goplus_base_url"] = "https://api.gopluslabs.io/api/v1"
+        save_web3_risk_config(config)
+        with db() as conn:
+            log_action(conn, session["user"]["id"], "SAVE_WEB3_RISK_CONFIG", "SYSTEM", detail="Web3 风控数据源配置已更新（未记录接口密钥）")
+        self.redirect("/settings?message=" + urllib.parse.quote("Web3 风控配置已安全保存，钱包检测将使用已配置的数据源。"))
+
+    def save_ip_risk(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form) or not session["user"]["is_owner"]:
+            return self.send_html("Forbidden", 403)
+        current = load_ip_risk_config()
+        provider = form.get("provider", "").strip() or "IPQualityScore"
+        api_url = form.get("api_url", "").strip()
+        if len(provider) > 80 or (api_url and (not api_url.startswith("https://") or len(api_url) > 800)):
+            return self.redirect("/settings?message=" + urllib.parse.quote("IP 风控供应商或 HTTPS 接口地址不正确。"))
+        api_key = form.get("api_key", "").strip()
+        if len(api_key) > 500:
+            return self.redirect("/settings?message=" + urllib.parse.quote("IP 风控 API Key 长度不正确。"))
+        save_ip_risk_config({"enabled": form.get("enabled") == "1", "provider": provider, "api_url": api_url, "api_key": api_key or current.get("api_key", "")})
+        with db() as conn:
+            log_action(conn, session["user"]["id"], "SAVE_IP_RISK_CONFIG", "SYSTEM", detail="IP 风控数据源配置已更新（未记录接口密钥）")
+        self.redirect("/settings?message=" + urllib.parse.quote("IP 风控配置已安全保存，新 IP 入库时将执行检测。"))
+
+    def save_payment_receiver(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form) or not session["user"]["is_owner"]:
+            return self.send_html("Forbidden", 403)
+        receiver = form.get("payment_receiver", "").strip()
+        if not EVM_ADDRESS_RE.fullmatch(receiver):
+            return self.redirect("/settings?message=" + urllib.parse.quote("收款地址必须是合法的 0x 开头 EVM 地址。"))
+        save_system_config({"payment_receiver": receiver})
+        with db() as conn:
+            log_action(conn, session["user"]["id"], "UPDATE_PAYMENT_RECEIVER", "SYSTEM", detail="会员收款地址已更新为 %s" % mask_wallet_address(receiver))
+        self.redirect("/settings?message=" + urllib.parse.quote("会员收款地址已更新；仅之后新建的订单会使用新地址。"))
 
     def save_cmc_key(self):
         session = self.require_user(admin=True)

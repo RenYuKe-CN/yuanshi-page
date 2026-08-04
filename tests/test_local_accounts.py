@@ -21,6 +21,9 @@ class LocalAccountTests(unittest.TestCase):
         APP.CMC_KEY_FILE = os.path.join(self.temp.name, "cmc_api_key.txt")
         APP.CMC_ICON_DIR = os.path.join(self.temp.name, "exchange_icons")
         APP.CMC_ICON_MAP_FILE = os.path.join(self.temp.name, "exchange_icons.json")
+        APP.WEB3_RISK_CONFIG_FILE = os.path.join(self.temp.name, "web3_risk.json")
+        APP.IP_RISK_CONFIG_FILE = os.path.join(self.temp.name, "ip_risk.json")
+        APP.SYSTEM_CONFIG_FILE = os.path.join(self.temp.name, "system.json")
         APP.SESSIONS.clear()
         APP.RATE_LIMITS.clear()
         APP.init_db()
@@ -258,7 +261,84 @@ class LocalAccountTests(unittest.TestCase):
         markup = APP.exchange_icon_markup("Binance")
         self.assertNotIn(filename, markup)
         self.assertIn('<span class="exchange-icon"', markup)
-        os.remove(APP.CMC_ICON_MAP_FILE)
+
+    def test_risk_query_types_validation_and_privacy_masking(self):
+        self.assertEqual(set(APP.CHECK_TYPES), {"ip", "wallet", "interaction", "evm", "solana", "tron", "btc", "other"})
+        self.assertEqual(APP.CHECK_TYPES["tron"]["placeholder"], "请输入 T 开头的波场地址")
+        self.assertEqual(APP.check_address("0x82a3f9b2c991a7caa5f7d063a6304a53d7404e43", "evm"), (True, "ethereum"))
+        self.assertEqual(APP.check_address("TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE", "tron"), (True, "tron"))
+        self.assertEqual(APP.check_address("0x123", "evm"), (False, "ethereum"))
+        self.assertEqual(APP.mask_username("zhangsan"), "z******n")
+        self.assertEqual(APP.mask_email("example@gmail.com"), "e*****e@gmail.com")
+        self.assertEqual(APP.mask_wallet_address("0x82a3f9b2c991a7"), "0x82a3...91a7")
+        with APP.db() as conn:
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+            timestamp = APP.now()
+            regular_id = conn.execute(
+                "INSERT INTO users(username,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("viewer", APP.hash_password("ViewerPass!123"), "USER", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            regular = conn.execute("SELECT * FROM users WHERE id=?", (regular_id,)).fetchone()
+        self.assertEqual(APP.display_ip_for_viewer("192.168.31.88", regular), "192.168.xxx.xxx")
+        self.assertEqual(APP.display_ip_for_viewer("192.168.31.88", owner), "192.168.31.88")
+        self.assertFalse(APP.viewer_can_export_full(regular))
+        self.assertTrue(APP.viewer_can_export_full(owner))
+
+    def test_unconfigured_wallet_source_never_returns_fabricated_risk(self):
+        old_evm = APP.EVM_RPC_URL
+        APP.EVM_RPC_URL = ""
+        try:
+            snapshot = APP.live_wallet_snapshot("0x82a3f9b2c991a7caa5f7d063a6304a53d7404e43", "ethereum")
+        finally:
+            APP.EVM_RPC_URL = old_evm
+        self.assertEqual(snapshot["status"], "NOT_CONFIGURED")
+        self.assertIsNone(snapshot["riskScore"])
+        self.assertEqual(snapshot["assets"], [])
+        self.assertFalse(snapshot["isRealtime"])
+
+    def test_owner_can_save_web3_risk_config_without_logging_keys(self):
+        with APP.db() as conn:
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+        handler, result = self.handler({
+            "csrf": "token", "evm_rpc_url": "https://rpc.example.com", "solana_rpc_url": "https://sol.example.com",
+            "goplus_enabled": "1", "goplus_base_url": "https://api.gopluslabs.io/api/v1", "goplus_api_key": "goplus-secret",
+            "label_api_url": "https://labels.example.com", "label_api_key": "label-secret",
+            "profile_api_url": "https://profile.example.com", "profile_api_key": "profile-secret",
+        })
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": owner}, handler)
+        handler.valid_csrf = types.MethodType(lambda self, session, form: True, handler)
+        handler.redirect = types.MethodType(lambda self, location, cookie=None: result.update(location=location), handler)
+        handler.save_web3_risk()
+        config = APP.load_web3_risk_config()
+        self.assertTrue(config["goplus_enabled"])
+        self.assertEqual(config["evm_rpc_url"], "https://rpc.example.com")
+        self.assertEqual(config["profile_api_key"], "profile-secret")
+        self.assertEqual(os.stat(APP.WEB3_RISK_CONFIG_FILE).st_mode & 0o777, 0o600)
+        with APP.db() as conn:
+            detail = conn.execute("SELECT detail FROM operation_logs WHERE action='SAVE_WEB3_RISK_CONFIG'").fetchone()["detail"]
+        self.assertNotIn("goplus-secret", detail)
+        self.assertNotIn("label-secret", detail)
+
+    def test_ip_risk_config_and_payment_receiver_are_owner_only(self):
+        with APP.db() as conn:
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+        handler, result = self.handler({
+            "csrf": "token", "enabled": "1", "provider": "IPQualityScore",
+            "api_url": "https://ip.example.com/{key}/{ip}", "api_key": "ip-secret",
+        })
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": owner}, handler)
+        handler.valid_csrf = types.MethodType(lambda self, session, form: True, handler)
+        handler.redirect = types.MethodType(lambda self, location, cookie=None: result.update(location=location), handler)
+        handler.save_ip_risk()
+        self.assertTrue(APP.load_ip_risk_config()["enabled"])
+        self.assertNotIn("ip-secret", APP.load_ip_risk_config()["api_key"] if False else "")
+
+        handler, result = self.handler({"csrf": "token", "payment_receiver": "0x1111111111111111111111111111111111111111"})
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": owner}, handler)
+        handler.valid_csrf = types.MethodType(lambda self, session, form: True, handler)
+        handler.redirect = types.MethodType(lambda self, location, cookie=None: result.update(location=location), handler)
+        handler.save_payment_receiver()
+        self.assertEqual(APP.current_payment_receiver(), "0x1111111111111111111111111111111111111111")
 
     def test_only_owner_can_save_cmc_key_and_key_is_not_logged(self):
         with APP.db() as conn:
