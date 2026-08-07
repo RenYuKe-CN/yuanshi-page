@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 import types
+import urllib.parse
 import unittest
 from datetime import datetime, timedelta
 
@@ -435,6 +436,54 @@ class LocalAccountTests(unittest.TestCase):
             saved = file.read()
         self.assertIn("secret-smtp-password", saved)
         self.assertEqual(os.stat(APP.smtp_config_file()).st_mode & 0o777, 0o600)
+
+    def test_owner_can_send_announcement_to_selected_active_users(self):
+        with APP.db() as conn:
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+            timestamp = APP.now()
+            first_id = conn.execute(
+                "INSERT INTO users(username,email,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                ("mailfirst", "first@gmail.com", APP.hash_password("FirstPass!123"), "USER", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO users(username,email,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                ("mailsecond", "second@gmail.com", APP.hash_password("SecondPass!123"), "USER", 0, "ACTIVE", timestamp, timestamp),
+            )
+        APP.save_smtp_config({"host": "smtp.example.com", "port": 587, "user": "no-reply@example.com", "password": "secret", "from": "no-reply@example.com", "mode": "starttls"})
+        handler, result = self.handler({
+            "csrf": "token", "subject": "系统公告", "body": "这是一条公告。", "audience": "selected", "recipient_ids": [str(first_id)],
+        })
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": owner}, handler)
+        handler.valid_csrf = types.MethodType(lambda self, session, form: True, handler)
+        handler.redirect = types.MethodType(lambda self, location, cookie=None: result.update(redirect=location), handler)
+        sent = []
+        original_deliver = APP.deliver_email
+        APP.deliver_email = lambda email, subject, body: sent.append((email, subject, body))
+        try:
+            handler.send_announcement()
+        finally:
+            APP.deliver_email = original_deliver
+        self.assertEqual(sent, [("first@gmail.com", "系统公告", "这是一条公告。")])
+        self.assertIn("成功 1 位", urllib.parse.unquote(result["redirect"]))
+        with APP.db() as conn:
+            record = conn.execute("SELECT audience,recipient_count,sent_count,failed_count FROM email_announcements").fetchone()
+            log = conn.execute("SELECT detail FROM operation_logs WHERE action='SEND_ANNOUNCEMENT_EMAIL'").fetchone()
+        self.assertEqual(tuple(record), ("选中用户", 1, 1, 0))
+        self.assertIn("正文未记录", log["detail"])
+
+    def test_announcement_rejects_backup_admin(self):
+        with APP.db() as conn:
+            timestamp = APP.now()
+            backup_id = conn.execute(
+                "INSERT INTO users(username,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("mailbackup", APP.hash_password("BackupPass!123"), "ADMIN", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            backup = conn.execute("SELECT * FROM users WHERE id=?", (backup_id,)).fetchone()
+        handler, result = self.handler({"csrf": "token"})
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": backup}, handler)
+        handler.valid_csrf = types.MethodType(lambda self, session, form: True, handler)
+        handler.send_announcement()
+        self.assertEqual(result["status"], 403)
 
     def delete_as(self, actor, target_id):
         handler, result = self.handler({"csrf": "token", "id": str(target_id)})

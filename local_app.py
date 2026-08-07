@@ -276,6 +276,17 @@ def init_db():
           created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_wallet_checks_address ON wallet_checks(address);
+        CREATE TABLE IF NOT EXISTS email_announcements (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sender_user_id INTEGER NOT NULL REFERENCES users(id),
+          subject TEXT NOT NULL,
+          audience TEXT NOT NULL,
+          recipient_count INTEGER NOT NULL DEFAULT 0,
+          sent_count INTEGER NOT NULL DEFAULT 0,
+          failed_count INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_email_announcements_created ON email_announcements(created_at);
         """)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "recovery_hash" not in columns:
@@ -1045,6 +1056,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 10p
 .exchange-icon-img{display:block;object-fit:cover;background:#fff;border:1px solid #e3e8f0;padding:2px}
 .exchange-picker{position:relative}.exchange-picker>summary{list-style:none;display:flex;align-items:center;min-height:44px;padding:7px 38px 7px 11px;border:1px solid #cfd9e7;border-radius:9px;background:#fff;cursor:pointer;position:relative}.exchange-picker>summary::-webkit-details-marker{display:none}.exchange-picker>summary:after{content:"⌄";position:absolute;right:13px;font-size:18px;color:#66758a}.exchange-picker[open]{z-index:9999}.exchange-picker[open]>summary{border-color:#2457d6}.exchange-menu{position:absolute;z-index:9999;top:calc(100% + 8px);right:0;width:min(520px,88vw);padding:12px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:#111827;color:#f8fafc;box-shadow:0 28px 90px #000b}.exchange-search{margin-bottom:10px;color:#f8fafc;background:#1f2937;border-color:rgba(255,255,255,.12);font-weight:850}.exchange-list{max-height:min(520px,68vh);overflow:auto}.exchange-group>strong{display:block;position:sticky;top:0;padding:10px 11px;background:#1b2433;color:#9fb0c8;font-size:13px;font-weight:950;z-index:1}.exchange-option{display:flex;align-items:center;gap:13px;margin:1px 0;padding:10px 11px;border-radius:12px;cursor:pointer;font-weight:950;color:#f8fafc;letter-spacing:-.35px}.exchange-option span:last-child{color:#f8fafc;font-size:16px;font-weight:950;text-shadow:0 2px 12px #0008}.exchange-option:hover{background:rgba(255,255,255,.075)}.exchange-option input{width:auto;margin:0;accent-color:#3b82f6}.exchange-option input:checked~span:last-child{color:#f6d680;font-weight:950}
 .pager{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:15px}.pager a,.pager .on{display:inline-flex;align-items:center;justify-content:center;min-width:36px;padding:7px 11px;border:1px solid var(--line);border-radius:7px;background:rgba(255,255,255,.07);color:#d8e2f2}.pager a:hover{border-color:rgba(246,214,128,.46);background:rgba(246,214,128,.12);color:#fff}.pager .on{border-color:rgba(246,214,128,.52);background:rgba(246,214,128,.18);color:#f6d680;font-weight:850}.segments .seg{border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.065);color:#dbe6f6}.segments .seg.yes{border-color:rgba(74,222,128,.28);background:rgba(34,197,94,.13);color:#9af7c8}.segments .seg.no{border-color:rgba(251,113,133,.28);background:rgba(248,113,113,.13);color:#fecaca}.stat{font-size:34px;font-weight:850}.ip-intel-grid{grid-template-columns:repeat(4,minmax(0,1fr));align-items:start}.ip-intel-grid .col3{grid-column:span 1}.ip-intel-value{min-height:42px;margin-top:8px;color:#f2f6fd;font-size:16px;font-weight:800;line-height:1.55;overflow-wrap:anywhere;word-break:break-word}.ip-intel-score{font-size:24px;line-height:1.4;color:#f6d680}.actions{display:flex;gap:8px;align-items:end}.inline{display:inline}
+.check-option{display:inline-flex;align-items:center;gap:6px;margin:0 14px 10px 0}.recipient-picker{max-height:220px;overflow:auto;padding:12px;border:1px solid var(--line);border-radius:7px;background:rgba(255,255,255,.03)}textarea{width:100%;min-height:120px;resize:vertical}
 .market-terminal{padding:18px 18px 16px;background:radial-gradient(circle at 20% 0,rgba(246,214,128,.12),transparent 23rem),linear-gradient(145deg,rgba(10,22,38,.92),rgba(3,8,15,.96));border-color:rgba(246,214,128,.16)}
 .market-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.market-kicker{font:900 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.24em;color:#f6d680}.market-live{display:inline-flex;align-items:center;gap:7px;color:#78f6c8;font-size:12px;font-weight:900}.market-live:before{content:"";width:8px;height:8px;border-radius:50%;background:#34d399;box-shadow:0 0 16px #34d399;animation:pulse-dot 1.5s infinite}
 .market-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.market-tile{position:relative;min-height:178px;padding:18px;border:1px solid rgba(255,255,255,.10);border-radius:24px;background:linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018));overflow:hidden;transition:.2s ease}.market-tile:before{content:"";position:absolute;inset:0;background:linear-gradient(120deg,transparent,rgba(255,255,255,.08),transparent);transform:translateX(-120%);animation:scan-sheen 3.6s infinite}.market-tile:hover{transform:translateY(-3px);border-color:rgba(246,214,128,.36);box-shadow:0 24px 70px rgba(0,0,0,.28),0 0 32px rgba(246,214,128,.08)}
@@ -1174,7 +1186,8 @@ class App(BaseHTTPRequestHandler):
             length = min(int(self.headers.get("Content-Length", "0")), 1024 * 1024)
         except ValueError:
             length = 0
-        return {k: v[-1] for k, v in urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True).items()}
+        parsed = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
+        return {key: values if key == "recipient_ids" else values[-1] for key, values in parsed.items()}
 
     def session(self):
         jar = cookies.SimpleCookie(self.headers.get("Cookie", ""))
@@ -1339,6 +1352,8 @@ class App(BaseHTTPRequestHandler):
             return self.save_smtp()
         if path == "/settings/smtp-test":
             return self.send_smtp_test()
+        if path == "/settings/announcement":
+            return self.send_announcement()
         self.send_html("Not Found", 404)
 
     def login(self):
@@ -2403,6 +2418,13 @@ class App(BaseHTTPRequestHandler):
             user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             record_count = conn.execute("SELECT COUNT(*) FROM ip_records").fetchone()[0]
             log_count = conn.execute("SELECT COUNT(*) FROM operation_logs").fetchone()[0]
+            announcement_users = conn.execute(
+                "SELECT id,username,email FROM users WHERE deleted_at IS NULL AND status='ACTIVE' AND email IS NOT NULL AND email != '' ORDER BY is_owner DESC,username COLLATE NOCASE"
+            ).fetchall()
+            announcements = conn.execute(
+                """SELECT a.*,u.username AS sender_username FROM email_announcements a
+                   LEFT JOIN users u ON u.id=a.sender_user_id ORDER BY a.created_at DESC LIMIT 8"""
+            ).fetchall()
         icon_count = len(load_cmc_icon_map())
         key_ready = os.path.exists(CMC_KEY_FILE) and os.path.getsize(CMC_KEY_FILE) > 15
         if session["user"]["is_owner"]:
@@ -2448,6 +2470,29 @@ class App(BaseHTTPRequestHandler):
             session["csrf"],
             "" if smtp_ready else "disabled",
         )
+        recipient_options = "".join(
+            '<label class="check-option"><input type="checkbox" name="recipient_ids" value="%s"> <strong>%s</strong> <span class="muted">%s</span></label>' % (
+                user["id"], esc(user["username"]), esc(user["email"])
+            )
+            for user in announcement_users
+        ) or '<p class="muted">暂无可发送公告的启用用户邮箱。</p>'
+        announcement_rows = "".join(
+            '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s / %s / %s</td></tr>' % (
+                esc(item["created_at"]), esc(item["subject"]), esc(item["audience"]), esc(item["sender_username"] or "已删除用户"),
+                item["recipient_count"], item["sent_count"], item["failed_count"],
+            )
+            for item in announcements
+        ) or '<tr><td colspan="5" class="muted">暂无公告发送记录</td></tr>'
+        announcement_card = """<div class="card"><h2>公告邮件</h2>
+        <p>使用上方 SMTP 配置逐封发送公告邮件，不会向收件人暴露其他用户邮箱。仅总管理员可发送，范围仅包含状态为“启用”且邮箱有效的账户。</p>
+        <form method="post" action="/settings/announcement" onsubmit="return confirm('确认发送公告邮件？发送后无法撤回。');"><input type="hidden" name="csrf" value="%s">
+        <div class="grid"><div class="col12"><label>邮件主题</label><input name="subject" maxlength="160" placeholder="例如：原石金手指 · 系统公告" required></div>
+        <div class="col12"><label>公告正文</label><textarea name="body" rows="8" maxlength="12000" placeholder="请输入发送给用户的公告内容" required></textarea><p class="hint">将以纯文本邮件发送。请勿在公告中包含密码、API Key 或私钥等敏感信息。</p></div>
+        <div class="col12"><label>发送范围</label><div class="segments"><label><input type="radio" name="audience" value="all" checked> 全部可发送用户（%s）</label><label><input type="radio" name="audience" value="selected"> 仅发送给下方勾选用户</label></div></div>
+        <div class="col12 recipient-picker">%s</div><div class="col12"><button %s>发送公告邮件</button></div></div></form>
+        <div class="tablewrap" style="margin-top:18px"><table><thead><tr><th>时间</th><th>主题</th><th>范围</th><th>发送人</th><th>目标 / 成功 / 失败</th></tr></thead><tbody>%s</tbody></table></div></div>""" % (
+            session["csrf"], len(announcement_users), recipient_options, "" if smtp_ready and announcement_users else "disabled", announcement_rows,
+        )
         web3_cfg = load_web3_risk_config()
         web3_card = """<div class="card"><h2>第三方 Web3 风控与钱包画像 API</h2>
         <p>推荐地址安全源：<strong>GoPlus Security</strong>。它适合先接入基础地址安全、恶意/钓鱼合约与代币风险信息；RPC 负责真实余额。更完整的 CEX 标签、资金追踪、制裁与 AML 风险可在下方接入商业标签库。</p>
@@ -2472,7 +2517,7 @@ class App(BaseHTTPRequestHandler):
         system_cfg = load_system_config()
         payment_card = """<div class="card"><h2>会员收款地址</h2><p>新订单会使用当前配置的 BSC / BEP20 收款地址，并将地址快照写入订单；修改地址不会影响已经生成订单的自动核验。</p><form method="post" action="/settings/payment-receiver"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col9"><label>BEP20 收款地址</label><input name="payment_receiver" value="%s" pattern="0x[a-fA-F0-9]{40}" spellcheck="false" required><p class="hint">仅接受 0x 开头的 42 位 EVM 地址。请确认该地址可接收 BSC 上的 USDT / USDC。</p></div><div class="col3 query-action-row"><button>更新收款地址</button></div></div></form></div>""" % (session["csrf"], esc(system_cfg["payment_receiver"]))
         content = flash + """<div class="grid"><div class="card col4"><div class="muted">用户数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">IP 记录数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">操作日志数</div><div class="stat">%s</div></div></div>
-        %s%s%s%s%s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, payment_card, ip_card, web3_card, smtp_card, cmc_card)
+        %s%s%s%s%s%s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, payment_card, ip_card, web3_card, smtp_card, announcement_card, cmc_card)
         self.send_html(self.page(session, "系统设置", content, "settings"))
 
     def save_web3_risk(self):
@@ -2610,6 +2655,80 @@ class App(BaseHTTPRequestHandler):
         with db() as conn:
             log_action(conn, session["user"]["id"], "TEST_SMTP", "SYSTEM", detail="测试邮件已发送至 %s" % test_email)
         self.redirect("/settings?message=" + urllib.parse.quote("测试邮件已发送，请查收 %s。" % test_email))
+
+    def send_announcement(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form) or not session["user"]["is_owner"]:
+            return self.send_html("Forbidden", 403)
+        subject = form.get("subject", "").strip()
+        body = form.get("body", "").strip()
+        audience = form.get("audience", "")
+        selected_ids = form.get("recipient_ids", [])
+        if not isinstance(selected_ids, list):
+            selected_ids = [selected_ids]
+        try:
+            selected_ids = sorted({int(value) for value in selected_ids if int(value) > 0})
+        except (TypeError, ValueError):
+            return self.redirect("/settings?message=" + urllib.parse.quote("所选用户格式不正确。"))
+        if not subject or len(subject) > 160 or not body or len(body) > 12000:
+            return self.redirect("/settings?message=" + urllib.parse.quote("请填写 1–160 字主题和 1–12000 字公告正文。"))
+        if audience not in ("all", "selected"):
+            return self.redirect("/settings?message=" + urllib.parse.quote("请选择公告发送范围。"))
+        smtp_cfg = load_smtp_config()
+        if not (smtp_cfg["host"] and smtp_cfg["user"] and smtp_cfg["password"] and smtp_cfg["from"]):
+            return self.redirect("/settings?message=" + urllib.parse.quote("请先配置可用的 SMTP 邮件服务。"))
+        with db() as conn:
+            if audience == "all":
+                recipients = conn.execute(
+                    "SELECT id,email FROM users WHERE deleted_at IS NULL AND status='ACTIVE' AND email IS NOT NULL AND email != ''"
+                ).fetchall()
+                audience_label = "全部可发送用户"
+            elif selected_ids:
+                placeholders = ",".join("?" for _ in selected_ids)
+                recipients = conn.execute(
+                    "SELECT id,email FROM users WHERE deleted_at IS NULL AND status='ACTIVE' AND email IS NOT NULL AND email != '' AND id IN (%s)" % placeholders,
+                    selected_ids,
+                ).fetchall()
+                audience_label = "选中用户"
+            else:
+                recipients = []
+                audience_label = "选中用户"
+        recipients = [recipient for recipient in recipients if EMAIL_RE.fullmatch(recipient["email"] or "")]
+        if not recipients:
+            return self.redirect("/settings?message=" + urllib.parse.quote("该范围内没有可发送公告的启用用户邮箱。"))
+        rate_key = "announcement:%s" % session["user"]["id"]
+        attempts = RATE_LIMITS.setdefault(rate_key, [])
+        cutoff = time.time() - 60
+        attempts[:] = [timestamp for timestamp in attempts if timestamp > cutoff]
+        if attempts:
+            return self.redirect("/settings?message=" + urllib.parse.quote("公告发送操作过于频繁，请一分钟后再试。"))
+        attempts.append(time.time())
+        sent_count = 0
+        failed_count = 0
+        for recipient in recipients:
+            try:
+                deliver_email(recipient["email"], subject, body)
+                sent_count += 1
+            except Exception:
+                failed_count += 1
+        with db() as conn:
+            announcement_id = conn.execute(
+                """INSERT INTO email_announcements(sender_user_id,subject,audience,recipient_count,sent_count,failed_count,created_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (session["user"]["id"], subject, audience_label, len(recipients), sent_count, failed_count, now()),
+            ).lastrowid
+            log_action(
+                conn,
+                session["user"]["id"],
+                "SEND_ANNOUNCEMENT_EMAIL",
+                "EMAIL_ANNOUNCEMENT",
+                announcement_id,
+                "范围=%s，目标=%s，成功=%s，失败=%s；正文未记录" % (audience_label, len(recipients), sent_count, failed_count),
+            )
+        self.redirect("/settings?message=" + urllib.parse.quote("公告发送完成：目标 %s 位，成功 %s 位，失败 %s 位。" % (len(recipients), sent_count, failed_count)))
 
     def sync_cmc(self):
         session = self.require_user(admin=True)
