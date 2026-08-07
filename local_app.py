@@ -50,9 +50,10 @@ PLAN_CONFIG = {
     "PRO": {"name": "旗舰 PRO", "price": 39.9, "limit": -1, "days": 30},
 }
 MEMBERSHIP_PERIODS = {
-    1: {"name": "1 个月", "discount": 1.0, "label": "月付"},
-    3: {"name": "3 个月", "discount": 0.9, "label": "9 折"},
-    6: {"name": "6 个月", "discount": 0.7, "label": "7 折"},
+    1: {"name": "1 个月", "prices": {"STARSHIP": 12.0, "PRO": 39.9}},
+    3: {"name": "3 个月", "prices": {"STARSHIP": 33.0, "PRO": 109.0}},
+    6: {"name": "6 个月", "prices": {"STARSHIP": 60.0, "PRO": 199.0}},
+    12: {"name": "年会员", "prices": {"STARSHIP": 96.0, "PRO": 319.0}},
 }
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
@@ -761,7 +762,16 @@ def verify_bep20_payment(tx_hash, token, expected_amount, receiver):
 
 
 def membership_price(plan, months):
-    return round(PLAN_CONFIG[plan]["price"] * months * MEMBERSHIP_PERIODS[months]["discount"], 2)
+    return MEMBERSHIP_PERIODS[months]["prices"][plan]
+
+
+def membership_monthly_equivalent(plan, months):
+    return round(membership_price(plan, months) / months, 1)
+
+
+def money_display(amount):
+    amount = float(amount)
+    return ("%.1f" % amount).rstrip("0").rstrip(".")
 
 
 def activate_membership(conn, user_id, plan, months=1):
@@ -2023,8 +2033,8 @@ class App(BaseHTTPRequestHandler):
         current_expiry = current_user["membership_expires_at"] or "暂无到期时间"
         plans = [
             ("plan-free", "", "基础入口", "普通用户", "0", "默认账户", ["可以注册、登录和浏览页面", "不能执行 IP 查询", "需要开通会员后使用查重功能"]),
-            ("plan-starship", "STARSHIP", "热门开通", "星舰会员", "12", "USDT / USDC / 月起", ["全部 CEX 与 DEX", "每月查询额度 10 次", "支持 1、3、6 个月周期", "适合小团队环境管理"]),
-            ("plan-pro", "PRO", "旗舰首选", "旗舰 PRO", "39.9", "USDT / USDC / 月起", ["全部交易所", "无限查询与无限历史", "支持 1、3、6 个月周期", "优先客服", "适合高频业务团队"]),
+            ("plan-starship", "STARSHIP", "热门开通", "星舰会员", "12", "USDT / USDC / 月起", ["全部 CEX 与 DEX", "每月查询额度 10 次", "支持 1、3、6 个月及年会员", "适合小团队环境管理"]),
+            ("plan-pro", "PRO", "旗舰首选", "旗舰 PRO", "39.9", "USDT / USDC / 月起", ["全部交易所", "无限查询与无限历史", "支持 1、3、6 个月及年会员", "优先客服", "适合高频业务团队"]),
         ]
         plan_html = "".join(
             """<div class="card col4 plan-card %s"><span class="plan-badge">%s</span><h2>%s</h2><div><span class="plan-price">%s</span><span class="plan-unit"> %s</span></div><ul>%s</ul>%s</div>""" % (
@@ -2034,7 +2044,13 @@ class App(BaseHTTPRequestHandler):
                 esc(price if price == "0" else "$" + price),
                 esc(unit),
                 "".join("<li>%s</li>" % esc(item) for item in features),
-                "" if price == "0" else """<form method="post" action="/membership/create-order" class="plan-order-form"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="plan" value="%s"><label>开通周期</label><select name="months"><option value="1">1 个月 · $%s（月付）</option><option value="3">3 个月 · $%s（9 折）</option><option value="6">6 个月 · $%s（7 折）</option></select><label>付款币种</label><select name="token"><option value="USDT">USDT</option><option value="USDC">USDC</option></select><button style="margin-top:14px">选择套餐并付款</button></form>""" % (esc(session["csrf"]), esc(plan_code), membership_price(plan_code, 1), membership_price(plan_code, 3), membership_price(plan_code, 6)),
+                "" if price == "0" else """<form method="post" action="/membership/create-order" class="plan-order-form"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="plan" value="%s"><label>开通周期</label><select name="months"><option value="1">1 个月 · $%s（$%s / 月）</option><option value="3">3 个月 · $%s（$%s / 月）</option><option value="6">6 个月 · $%s（$%s / 月）</option><option value="12">年会员 · $%s（$%s / 月）</option></select><label>付款币种</label><select name="token"><option value="USDT">USDT</option><option value="USDC">USDC</option></select><button style="margin-top:14px">选择套餐并付款</button></form>""" % (
+                    esc(session["csrf"]), esc(plan_code),
+                    money_display(membership_price(plan_code, 1)), money_display(membership_monthly_equivalent(plan_code, 1)),
+                    money_display(membership_price(plan_code, 3)), money_display(membership_monthly_equivalent(plan_code, 3)),
+                    money_display(membership_price(plan_code, 6)), money_display(membership_monthly_equivalent(plan_code, 6)),
+                    money_display(membership_price(plan_code, 12)), money_display(membership_monthly_equivalent(plan_code, 12)),
+                ),
             )
             for style, plan_code, badge, name, price, unit, features in plans
         )
@@ -2311,16 +2327,31 @@ class App(BaseHTTPRequestHandler):
             log_count = conn.execute("SELECT COUNT(*) FROM operation_logs").fetchone()[0]
             admin_count = conn.execute("SELECT COUNT(*) FROM users WHERE role='ADMIN' AND deleted_at IS NULL").fetchone()[0]
             normal_count = conn.execute("SELECT COUNT(*) FROM users WHERE role='USER' AND deleted_at IS NULL").fetchone()[0]
+            payment_summary = conn.execute(
+                "SELECT COUNT(*) AS order_count,COALESCE(SUM(amount),0) AS total_amount FROM membership_orders WHERE status='PAID'"
+            ).fetchone()
+            active_starship = conn.execute(
+                """SELECT COUNT(*) FROM users
+                   WHERE deleted_at IS NULL AND membership_plan='STARSHIP'
+                     AND membership_status='ACTIVE' AND membership_expires_at >= ?""",
+                (now(),),
+            ).fetchone()[0]
+            active_pro = conn.execute(
+                """SELECT COUNT(*) FROM users
+                   WHERE deleted_at IS NULL AND membership_plan='PRO'
+                     AND membership_status='ACTIVE' AND membership_expires_at >= ?""",
+                (now(),),
+            ).fetchone()[0]
             recent = conn.execute(
                 """SELECT r.full_ip,r.exchange,r.last_similarity,r.last_seen_at,u.username
                    FROM ip_records r JOIN users u ON u.id=r.user_id
                    ORDER BY r.last_seen_at DESC LIMIT 8"""
             ).fetchall()
         cards = [
-            ("累计收款", "$0", "按已确认订单统计"),
-            ("收款笔数", "0", "按已确认付款笔数统计"),
-            ("星舰会员", "0", "当前有效星舰会员"),
-            ("旗舰 PRO", "0", "当前有效旗舰 PRO 会员"),
+            ("累计收款", "$" + money_display(payment_summary["total_amount"]), "已确认 USDT / USDC 订单金额汇总"),
+            ("收款笔数", str(payment_summary["order_count"]), "按已确认付款订单统计"),
+            ("星舰会员", str(active_starship), "当前有效且未到期的星舰会员"),
+            ("旗舰 PRO", str(active_pro), "当前有效且未到期的旗舰 PRO 会员"),
             ("今日调用查询 IP", str(today_queries), "今日成功查询次数"),
             ("累计调用查询 IP", str(total_queries), "按查询日志统计"),
             ("24 小时活跃", str(active_24h), "按最近登录时间统计"),

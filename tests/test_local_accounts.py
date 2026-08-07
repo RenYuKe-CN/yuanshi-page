@@ -4,7 +4,7 @@ import re
 import tempfile
 import types
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -290,8 +290,14 @@ class LocalAccountTests(unittest.TestCase):
 
     def test_membership_period_price_and_activation(self):
         self.assertEqual(APP.membership_price("STARSHIP", 1), 12.0)
-        self.assertEqual(APP.membership_price("STARSHIP", 3), 32.4)
-        self.assertEqual(APP.membership_price("PRO", 6), 167.58)
+        self.assertEqual(APP.membership_price("STARSHIP", 3), 33.0)
+        self.assertEqual(APP.membership_price("STARSHIP", 6), 60.0)
+        self.assertEqual(APP.membership_price("STARSHIP", 12), 96.0)
+        self.assertEqual(APP.membership_price("PRO", 3), 109.0)
+        self.assertEqual(APP.membership_price("PRO", 6), 199.0)
+        self.assertEqual(APP.membership_price("PRO", 12), 319.0)
+        self.assertEqual(APP.membership_monthly_equivalent("STARSHIP", 12), 8.0)
+        self.assertEqual(APP.membership_monthly_equivalent("PRO", 12), 26.6)
         with APP.db() as conn:
             user_id = conn.execute(
                 "INSERT INTO users(username,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
@@ -303,6 +309,41 @@ class LocalAccountTests(unittest.TestCase):
         self.assertEqual(user["membership_status"], "ACTIVE")
         self.assertEqual(user["membership_expires_at"], expiry)
         self.assertGreater((datetime.strptime(expiry, "%Y-%m-%d %H:%M:%S") - datetime.now()).days, 88)
+
+    def test_analytics_uses_paid_orders_and_active_memberships(self):
+        with APP.db() as conn:
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+            timestamp = APP.now()
+            future = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+            starship_id = conn.execute(
+                """INSERT INTO users(username,password_hash,role,is_owner,status,membership_plan,membership_status,membership_expires_at,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                ("analyticsstar", APP.hash_password("StarPass!123"), "USER", 0, "ACTIVE", "STARSHIP", "ACTIVE", future, timestamp, timestamp),
+            ).lastrowid
+            pro_id = conn.execute(
+                """INSERT INTO users(username,password_hash,role,is_owner,status,membership_plan,membership_status,membership_expires_at,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                ("analyticspro", APP.hash_password("ProPass!123"), "USER", 0, "ACTIVE", "PRO", "ACTIVE", future, timestamp, timestamp),
+            ).lastrowid
+            conn.execute(
+                """INSERT INTO membership_orders(order_no,user_id,plan,months,token,amount,receiver,status,paid_at,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                ("YS-ANALYTICS-PAID", starship_id, "STARSHIP", 3, "USDT", 33.0, "0xreceiver", "PAID", timestamp, timestamp, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO membership_orders(order_no,user_id,plan,months,token,amount,receiver,status,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                ("YS-ANALYTICS-PENDING", pro_id, "PRO", 12, "USDT", 319.0, "0xreceiver", "PENDING", timestamp, timestamp),
+            )
+        handler, result = self.handler({})
+        session = {"token": "session", "csrf": "token", "user": owner}
+        handler.require_user = types.MethodType(lambda self, admin=False: session, handler)
+        handler.analytics({})
+        self.assertEqual(result["status"], 200)
+        self.assertIn("$33", result["content"])
+        self.assertIn("当前有效且未到期的星舰会员", result["content"])
+        self.assertIn("当前有效且未到期的旗舰 PRO 会员", result["content"])
+        self.assertNotIn("$352", result["content"])
 
     def test_unconfigured_wallet_source_never_returns_fabricated_risk(self):
         old_evm = APP.EVM_RPC_URL
