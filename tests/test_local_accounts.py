@@ -4,6 +4,7 @@ import re
 import tempfile
 import types
 import unittest
+from datetime import datetime
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -283,6 +284,25 @@ class LocalAccountTests(unittest.TestCase):
         self.assertEqual(APP.display_ip_for_viewer("192.168.31.88", owner), "192.168.31.88")
         self.assertFalse(APP.viewer_can_export_full(regular))
         self.assertTrue(APP.viewer_can_export_full(owner))
+        record = {"username": "zhangsan", "email": "example@gmail.com"}
+        self.assertEqual(APP.user_identity(record, regular), "<div><strong>z******n</strong></div>")
+        self.assertIn("example@gmail.com", APP.user_identity(record, owner))
+
+    def test_membership_period_price_and_activation(self):
+        self.assertEqual(APP.membership_price("STARSHIP", 1), 12.0)
+        self.assertEqual(APP.membership_price("STARSHIP", 3), 32.4)
+        self.assertEqual(APP.membership_price("PRO", 6), 167.58)
+        with APP.db() as conn:
+            user_id = conn.execute(
+                "INSERT INTO users(username,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("perioduser", APP.hash_password("PeriodPass!123"), "USER", 0, "ACTIVE", APP.now(), APP.now()),
+            ).lastrowid
+            expiry = APP.activate_membership(conn, user_id, "STARSHIP", 3)
+            user = conn.execute("SELECT membership_plan,membership_status,membership_expires_at FROM users WHERE id=?", (user_id,)).fetchone()
+        self.assertEqual(user["membership_plan"], "STARSHIP")
+        self.assertEqual(user["membership_status"], "ACTIVE")
+        self.assertEqual(user["membership_expires_at"], expiry)
+        self.assertGreater((datetime.strptime(expiry, "%Y-%m-%d %H:%M:%S") - datetime.now()).days, 88)
 
     def test_unconfigured_wallet_source_never_returns_fabricated_risk(self):
         old_evm = APP.EVM_RPC_URL

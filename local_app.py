@@ -49,6 +49,11 @@ PLAN_CONFIG = {
     "STARSHIP": {"name": "星舰会员", "price": 12.0, "limit": 10, "days": 30},
     "PRO": {"name": "旗舰 PRO", "price": 39.9, "limit": -1, "days": 30},
 }
+MEMBERSHIP_PERIODS = {
+    1: {"name": "1 个月", "discount": 1.0, "label": "月付"},
+    3: {"name": "3 个月", "discount": 0.9, "label": "9 折"},
+    6: {"name": "6 个月", "discount": 0.7, "label": "7 折"},
+}
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
@@ -291,6 +296,9 @@ def init_db():
         ]:
             if column not in columns:
                 conn.execute(ddl)
+        order_columns = {row["name"] for row in conn.execute("PRAGMA table_info(membership_orders)").fetchall()}
+        if "months" not in order_columns:
+            conn.execute("ALTER TABLE membership_orders ADD COLUMN months INTEGER NOT NULL DEFAULT 1")
         ip_columns = {row["name"] for row in conn.execute("PRAGMA table_info(ip_records)").fetchall()}
         for column, ddl in [
             ("country", "ALTER TABLE ip_records ADD COLUMN country TEXT"),
@@ -578,10 +586,11 @@ def display_ip_for_viewer(value, viewer):
 
 
 def user_identity(row, viewer=None):
-    email = row["email"] if "email" in row.keys() and row["email"] else "未绑定邮箱"
     full = bool(viewer and viewer["is_owner"])
     username = row["username"] if full else mask_username(row["username"])
-    email = email if full else mask_email(email)
+    if not full:
+        return '<div><strong>%s</strong></div>' % esc(username)
+    email = row["email"] if "email" in row.keys() and row["email"] else "未绑定邮箱"
     return '<div><strong>%s</strong><br><small class="muted">%s</small></div>' % (esc(username), esc(email))
 
 
@@ -751,8 +760,15 @@ def verify_bep20_payment(tx_hash, token, expected_amount, receiver):
     return False, "未找到转入收款地址的足额 %s BEP20 转账" % token
 
 
-def activate_membership(conn, user_id, plan):
+def membership_price(plan, months):
+    return round(PLAN_CONFIG[plan]["price"] * months * MEMBERSHIP_PERIODS[months]["discount"], 2)
+
+
+def activate_membership(conn, user_id, plan, months=1):
     config = PLAN_CONFIG[plan]
+    months = int(months)
+    if months not in MEMBERSHIP_PERIODS:
+        raise ValueError("无效的会员周期")
     ts = now()
     base = datetime.now()
     current = conn.execute(
@@ -766,7 +782,7 @@ def activate_membership(conn, user_id, plan):
                 base = previous
         except ValueError:
             pass
-    expires_at = (base + timedelta(days=config["days"])).strftime("%Y-%m-%d %H:%M:%S")
+    expires_at = (base + timedelta(days=config["days"] * months)).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
         "UPDATE users SET membership_plan=?,membership_status='ACTIVE',query_limit=?,query_used=0,membership_expires_at=?,updated_at=? WHERE id=?",
         (plan, config["limit"], expires_at, ts, user_id),
@@ -1938,18 +1954,22 @@ class App(BaseHTTPRequestHandler):
         if not self.valid_csrf(session, form):
             return self.send_html(self.page(session, "请求失败", '<div class="flash err">请求已失效，请刷新页面重试。</div>'), 403)
         plan = form.get("plan", "").strip().upper()
+        try:
+            months = int(form.get("months", "1"))
+        except ValueError:
+            months = 0
         token = form.get("token", "USDT").strip().upper()
-        if plan not in PLAN_CONFIG or token not in TOKEN_CONTRACTS:
+        if plan not in PLAN_CONFIG or months not in MEMBERSHIP_PERIODS or token not in TOKEN_CONTRACTS:
             return self.redirect("/membership?message=" + urllib.parse.quote("请选择有效套餐和付款币种。"))
         ts = now()
         order_no = "YS" + datetime.utcnow().strftime("%Y%m%d%H%M%S") + secrets.token_hex(3).upper()
         config = PLAN_CONFIG[plan]
         with db() as conn:
             conn.execute(
-                "INSERT INTO membership_orders(order_no,user_id,plan,token,amount,receiver,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (order_no, session["user"]["id"], plan, token, config["price"], current_payment_receiver(), "PENDING", ts, ts),
+                "INSERT INTO membership_orders(order_no,user_id,plan,months,token,amount,receiver,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (order_no, session["user"]["id"], plan, months, token, membership_price(plan, months), current_payment_receiver(), "PENDING", ts, ts),
             )
-            log_action(conn, session["user"]["id"], "CREATE_ORDER", "MEMBERSHIP_ORDER", order_no, json.dumps({"plan": plan, "token": token, "amount": config["price"]}, ensure_ascii=False))
+            log_action(conn, session["user"]["id"], "CREATE_ORDER", "MEMBERSHIP_ORDER", order_no, json.dumps({"plan": plan, "months": months, "token": token, "amount": membership_price(plan, months)}, ensure_ascii=False))
         self.redirect("/membership?order=" + urllib.parse.quote(order_no) + "#payment")
 
     def verify_membership_order(self):
@@ -1979,7 +1999,7 @@ class App(BaseHTTPRequestHandler):
                 conn.execute("UPDATE membership_orders SET tx_hash=?,status='REJECTED',verify_detail=?,updated_at=? WHERE id=?", (tx_hash, detail, ts, order["id"]))
                 log_action(conn, session["user"]["id"], "VERIFY_ORDER_FAILED", "MEMBERSHIP_ORDER", order_no, detail)
                 return self.redirect("/membership?order=%s&message=%s#payment" % (urllib.parse.quote(order_no), urllib.parse.quote(detail)))
-            expires_at = activate_membership(conn, session["user"]["id"], order["plan"])
+            expires_at = activate_membership(conn, session["user"]["id"], order["plan"], order["months"])
             conn.execute("UPDATE membership_orders SET tx_hash=?,status='PAID',verify_detail=?,paid_at=?,updated_at=? WHERE id=?", (tx_hash, detail, ts, ts, order["id"]))
             log_action(conn, session["user"]["id"], "VERIFY_ORDER_PAID", "MEMBERSHIP_ORDER", order_no, detail)
         self.redirect("/membership?success=1")
@@ -2003,8 +2023,8 @@ class App(BaseHTTPRequestHandler):
         current_expiry = current_user["membership_expires_at"] or "暂无到期时间"
         plans = [
             ("plan-free", "", "基础入口", "普通用户", "0", "默认账户", ["可以注册、登录和浏览页面", "不能执行 IP 查询", "需要开通会员后使用查重功能"]),
-            ("plan-starship", "STARSHIP", "热门开通", "星舰会员", "12", "USDT / USDC", ["全部 CEX 与 DEX", "会员周期内总查询 10 次", "开通日起一个自然月", "适合小团队环境管理"]),
-            ("plan-pro", "PRO", "旗舰首选", "旗舰 PRO", "39.9", "USDT / USDC / 月", ["全部交易所", "无限查询与无限历史", "每月续费使用全部功能", "优先客服", "适合高频业务团队"]),
+            ("plan-starship", "STARSHIP", "热门开通", "星舰会员", "12", "USDT / USDC / 月起", ["全部 CEX 与 DEX", "每月查询额度 10 次", "支持 1、3、6 个月周期", "适合小团队环境管理"]),
+            ("plan-pro", "PRO", "旗舰首选", "旗舰 PRO", "39.9", "USDT / USDC / 月起", ["全部交易所", "无限查询与无限历史", "支持 1、3、6 个月周期", "优先客服", "适合高频业务团队"]),
         ]
         plan_html = "".join(
             """<div class="card col4 plan-card %s"><span class="plan-badge">%s</span><h2>%s</h2><div><span class="plan-price">%s</span><span class="plan-unit"> %s</span></div><ul>%s</ul>%s</div>""" % (
@@ -2014,14 +2034,14 @@ class App(BaseHTTPRequestHandler):
                 esc(price if price == "0" else "$" + price),
                 esc(unit),
                 "".join("<li>%s</li>" % esc(item) for item in features),
-                "" if price == "0" else """<form method="post" action="/membership/create-order" class="plan-order-form"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="plan" value="%s"><select name="token"><option value="USDT">USDT</option><option value="USDC">USDC</option></select><button style="margin-top:14px">选择套餐并付款</button></form>""" % (esc(session["csrf"]), esc(plan_code)),
+                "" if price == "0" else """<form method="post" action="/membership/create-order" class="plan-order-form"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="plan" value="%s"><label>开通周期</label><select name="months"><option value="1">1 个月 · $%s（月付）</option><option value="3">3 个月 · $%s（9 折）</option><option value="6">6 个月 · $%s（7 折）</option></select><label>付款币种</label><select name="token"><option value="USDT">USDT</option><option value="USDC">USDC</option></select><button style="margin-top:14px">选择套餐并付款</button></form>""" % (esc(session["csrf"]), esc(plan_code), membership_price(plan_code, 1), membership_price(plan_code, 3), membership_price(plan_code, 6)),
             )
             for style, plan_code, badge, name, price, unit, features in plans
         )
         if order:
             verify_html = """<div class="order-box"><div class="grid"><div class="col3"><label>订单号</label><input readonly value="%s" onclick="this.select()"></div><div class="col3"><label>套餐</label><input readonly value="%s"></div><div class="col3"><label>币种 / 网络</label><input readonly value="%s · BEP20"></div><div class="col3"><label>金额</label><input readonly value="%s"></div></div>
             <form method="post" action="/membership/verify" class="verify-form"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="order_no" value="%s"><label>Transaction Hash</label><input name="tx_hash" placeholder="0x..." required><button>提交并自动检测付款</button></form></div>""" % (
-                esc(order["order_no"]), esc(PLAN_CONFIG[order["plan"]]["name"]), esc(order["token"]), esc(order["amount"]), esc(session["csrf"]), esc(order["order_no"])
+                esc(order["order_no"]), esc("%s · %s" % (PLAN_CONFIG[order["plan"]]["name"], MEMBERSHIP_PERIODS.get(int(order["months"] or 1), MEMBERSHIP_PERIODS[1])["name"])), esc(order["token"]), esc(order["amount"]), esc(session["csrf"]), esc(order["order_no"])
             )
         else:
             verify_html = '<div class="order-box muted">请先在上方选择套餐，系统会生成订单并跳转到这里。</div>'
