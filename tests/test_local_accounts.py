@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import os
 import re
 import tempfile
@@ -23,6 +24,7 @@ class LocalAccountTests(unittest.TestCase):
         APP.CMC_KEY_FILE = os.path.join(self.temp.name, "cmc_api_key.txt")
         APP.CMC_ICON_DIR = os.path.join(self.temp.name, "exchange_icons")
         APP.CMC_ICON_MAP_FILE = os.path.join(self.temp.name, "exchange_icons.json")
+        APP.EXCHANGE_CATALOG_FILE = os.path.join(self.temp.name, "exchange_catalog.json")
         APP.WEB3_RISK_CONFIG_FILE = os.path.join(self.temp.name, "web3_risk.json")
         APP.IP_RISK_CONFIG_FILE = os.path.join(self.temp.name, "ip_risk.json")
         APP.SYSTEM_CONFIG_FILE = os.path.join(self.temp.name, "system.json")
@@ -212,6 +214,7 @@ class LocalAccountTests(unittest.TestCase):
         picker = APP.exchange_picker("Bitrue")
         self.assertIn("CEX 中心化交易所", picker)
         self.assertIn("DEX 去中心化交易所", picker)
+        self.assertIn('class="exchange-search-status"', picker)
         self.assertEqual(picker.count('class="exchange-option"'), 166)
         self.assertEqual(len(re.findall(r'class="exchange-icon(?:\s|")', picker)), 167)
         self.assertIn('/assets/exchange-fx-protocol.png', picker)
@@ -224,6 +227,53 @@ class LocalAccountTests(unittest.TestCase):
         self.assertIn('value="" checked', history_picker)
         self.assertEqual(len(APP.BUSINESS_ITEMS), 9)
         self.assertIn(("⌕", "交易所流动性提供"), APP.BUSINESS_ITEMS)
+
+    def test_exchange_catalog_can_be_maintained_and_drives_picker(self):
+        catalog = APP.load_exchange_catalog()
+        self.assertEqual(len(APP.exchange_catalog_items()), 166)
+        catalog["items"].append({
+            "id": "custom-jupiter", "name": "Jupiter Pro", "group": "dex", "order": 1,
+            "aliases": ["JUP", "木星"], "icon_file": "", "icon_text": "JUP",
+            "enabled": True, "created_at": APP.now(), "updated_at": APP.now(),
+        })
+        for item in catalog["items"]:
+            if item["name"] == "Binance":
+                item["enabled"] = False
+        APP.save_exchange_catalog(catalog)
+        picker = APP.exchange_picker()
+        self.assertIn('value="Jupiter Pro"', picker)
+        self.assertIn('data-search="jupiter pro jup 木星 dex dex" data-name="jupiter pro"', picker)
+        self.assertNotIn('value="Binance"', picker)
+        self.assertIn("Jupiter Pro", APP.active_exchanges())
+        self.assertNotIn("Binance", APP.active_exchanges())
+        self.assertIsNotNone(APP.exchange_catalog_by_name("Binance", enabled_only=False))
+
+    def test_uploaded_exchange_icon_is_normalized_to_local_png(self):
+        from PIL import Image
+        source = io.BytesIO()
+        Image.new("RGB", (480, 120), "#2457d6").save(source, format="JPEG")
+        filename = APP.save_uploaded_exchange_icon(source.getvalue())
+        self.assertRegex(filename, r"^[0-9a-f]{32}\.png$")
+        target = os.path.join(APP.CMC_ICON_DIR, filename)
+        self.assertTrue(os.path.exists(target))
+        with Image.open(target) as image:
+            self.assertEqual(image.format, "PNG")
+            self.assertEqual(image.size, (256, 256))
+
+    def test_wallet_zone_route_and_wallet_picker_exclude_ip(self):
+        with APP.db() as conn:
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+        session = {"token": "session", "csrf": "token", "user": owner}
+        handler, result = self.handler({})
+        handler.require_user = types.MethodType(lambda self, admin=False: session, handler)
+        handler.wallet({})
+        self.assertEqual(result["status"], 200)
+        self.assertIn("钱包检测专区", result["content"])
+        self.assertIn('action="/wallet-check"', result["content"])
+        self.assertNotIn('value="ip">IP 地址检测', result["content"])
+        navigation = object.__new__(APP.App).page(session, "钱包检测专区", "", "wallet")
+        self.assertIn('href="/wallet">钱包检测专区</a>', navigation)
+        self.assertIn('class="on" href="/wallet"', navigation)
 
     def test_same_ip_can_be_saved_for_cex_dex_and_other(self):
         with APP.db() as conn:

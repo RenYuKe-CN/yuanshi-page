@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import csv
+import cgi
 import hashlib
 import hmac
 import html
@@ -30,6 +31,7 @@ ADMIN_FILE = os.path.join(DATA_DIR, "admin.txt")
 CMC_KEY_FILE = os.path.join(DATA_DIR, "cmc_api_key.txt")
 CMC_ICON_DIR = os.path.join(DATA_DIR, "exchange_icons")
 CMC_ICON_MAP_FILE = os.path.join(DATA_DIR, "exchange_icons.json")
+EXCHANGE_CATALOG_FILE = os.path.join(DATA_DIR, "exchange_catalog.json")
 WEB3_RISK_CONFIG_FILE = os.path.join(DATA_DIR, "web3_risk.json")
 IP_RISK_CONFIG_FILE = os.path.join(DATA_DIR, "ip_risk.json")
 SYSTEM_CONFIG_FILE = os.path.join(DATA_DIR, "system.json")
@@ -485,6 +487,161 @@ def save_system_config(config):
     os.chmod(SYSTEM_CONFIG_FILE, 0o600)
 
 
+EXCHANGE_GROUP_META = {
+    "cex": {"label": "CEX 中心化交易所", "short": "CEX"},
+    "dex": {"label": "DEX 去中心化交易所", "short": "DEX"},
+    "other": {"label": "其他", "short": "其他"},
+}
+EXCHANGE_ICON_FILE_RE = re.compile(r"^[0-9a-f]{32}\.png$")
+EXCHANGE_ICON_UPLOAD_MAX_BYTES = 4 * 1024 * 1024
+EXCHANGE_ICON_UPLOAD_MAX_PIXELS = 16 * 1024 * 1024
+
+
+def exchange_catalog_seed():
+    """Turn the versioned base list into a server-local editable catalog."""
+    items = []
+    for group, names in (("cex", CEX_EXCHANGES), ("dex", DEX_EXCHANGES), ("other", ["其他"])):
+        for order, name in enumerate(names, 1):
+            items.append({
+                "id": "%s-%s" % (group, hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]),
+                "name": name,
+                "group": group,
+                "order": order,
+                "aliases": [],
+                "icon_file": "",
+                "icon_text": "",
+                "enabled": True,
+                "created_at": now(),
+                "updated_at": now(),
+            })
+    return {"version": 1, "items": items}
+
+
+def normalize_exchange_catalog(raw):
+    items = raw.get("items", []) if isinstance(raw, dict) else []
+    normalized, names, ids = [], set(), set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        group = str(item.get("group") or "").lower()
+        item_id = str(item.get("id") or "").strip()
+        if not name or len(name) > 80 or group not in EXCHANGE_GROUP_META or not item_id or item_id in ids:
+            continue
+        name_key = name.casefold()
+        if name_key in names:
+            continue
+        aliases = []
+        for value in item.get("aliases", []):
+            value = str(value).strip()
+            if value and len(value) <= 80 and value.casefold() != name_key and value.casefold() not in {v.casefold() for v in aliases}:
+                aliases.append(value)
+        try:
+            order = max(1, int(item.get("order", index + 1)))
+        except (TypeError, ValueError):
+            order = index + 1
+        icon_file = str(item.get("icon_file") or "").strip().lower()
+        normalized.append({
+            "id": item_id,
+            "name": name,
+            "group": group,
+            "order": order,
+            "aliases": aliases,
+            "icon_file": icon_file if EXCHANGE_ICON_FILE_RE.fullmatch(icon_file) else "",
+            "icon_text": str(item.get("icon_text") or "").strip()[:6],
+            "enabled": bool(item.get("enabled", True)),
+            "created_at": str(item.get("created_at") or now()),
+            "updated_at": str(item.get("updated_at") or now()),
+        })
+        names.add(name_key)
+        ids.add(item_id)
+    for group in EXCHANGE_GROUP_META:
+        group_items = sorted((item for item in normalized if item["group"] == group), key=lambda item: (item["order"], item["name"].casefold()))
+        for order, item in enumerate(group_items, 1):
+            item["order"] = order
+    return {"version": 1, "items": normalized}
+
+
+def load_exchange_catalog():
+    try:
+        with open(EXCHANGE_CATALOG_FILE, "r", encoding="utf-8") as file:
+            catalog = normalize_exchange_catalog(json.load(file))
+        if catalog["items"]:
+            return catalog
+    except (OSError, ValueError):
+        pass
+    catalog = exchange_catalog_seed()
+    save_exchange_catalog(catalog)
+    return catalog
+
+
+def save_exchange_catalog(catalog):
+    catalog = normalize_exchange_catalog(catalog)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    temporary = EXCHANGE_CATALOG_FILE + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as file:
+        json.dump(catalog, file, ensure_ascii=False, indent=2)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, EXCHANGE_CATALOG_FILE)
+    return catalog
+
+
+def exchange_catalog_items(enabled_only=True):
+    items = load_exchange_catalog()["items"]
+    if enabled_only:
+        items = [item for item in items if item["enabled"]]
+    return sorted(items, key=lambda item: (list(EXCHANGE_GROUP_META).index(item["group"]), item["order"], item["name"].casefold()))
+
+
+def exchange_groups(enabled_only=True):
+    items = exchange_catalog_items(enabled_only)
+    return tuple((meta["label"], [item for item in items if item["group"] == group]) for group, meta in EXCHANGE_GROUP_META.items())
+
+
+def exchange_catalog_by_name(name, enabled_only=True):
+    key = str(name or "").casefold()
+    return next((item for item in exchange_catalog_items(enabled_only) if item["name"].casefold() == key), None)
+
+
+def active_exchanges():
+    return {item["name"] for item in exchange_catalog_items(True)}
+
+
+def save_uploaded_exchange_icon(data):
+    """Validate and normalize an administrator-uploaded icon into a local PNG asset."""
+    if not data or len(data) > EXCHANGE_ICON_UPLOAD_MAX_BYTES:
+        raise ValueError("图标文件不能为空，且不能超过 4 MB。")
+    try:
+        from PIL import Image, ImageOps
+        source = Image.open(io.BytesIO(data))
+        source.verify()
+        source = Image.open(io.BytesIO(data))
+        if source.format not in ("PNG", "JPEG", "WEBP"):
+            raise ValueError("仅支持 PNG、JPG 或 WebP 图标。")
+        if source.width * source.height > EXCHANGE_ICON_UPLOAD_MAX_PIXELS:
+            raise ValueError("图标像素过大，请上传小于 1600 万像素的图片。")
+        source = ImageOps.exif_transpose(source).convert("RGBA")
+        source.thumbnail((192, 192), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+        canvas.alpha_composite(source, ((256 - source.width) // 2, (256 - source.height) // 2))
+        output = io.BytesIO()
+        canvas.save(output, format="PNG", optimize=True)
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("无法读取该图片，请上传有效的 PNG、JPG 或 WebP 文件。")
+    os.makedirs(CMC_ICON_DIR, mode=0o700, exist_ok=True)
+    filename = hashlib.sha256(output.getvalue()).hexdigest()[:32] + ".png"
+    target = os.path.join(CMC_ICON_DIR, filename)
+    if not os.path.exists(target):
+        temporary = target + ".tmp"
+        with open(temporary, "wb") as file:
+            file.write(output.getvalue())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+    return filename
+
+
 def current_payment_receiver():
     return load_system_config()["payment_receiver"]
 
@@ -816,6 +973,9 @@ def exchange_label(value):
 
 
 def exchange_icon_text(value):
+    item = exchange_catalog_by_name(value, enabled_only=False)
+    if item and item["icon_text"]:
+        return item["icon_text"]
     words = re.findall(r"[A-Za-z0-9]+", exchange_label(value))
     if not words:
         return "其"
@@ -840,6 +1000,13 @@ def load_cmc_icon_map():
 
 def exchange_icon_markup(value):
     label = exchange_label(value)
+    item = exchange_catalog_by_name(label, enabled_only=False)
+    filename = item["icon_file"] if item else ""
+    if filename and (
+        os.path.exists(os.path.join(CMC_ICON_DIR, filename))
+        or os.path.exists(os.path.join(BRAND_DIR, "exchanges", filename))
+    ):
+        return '<img class="exchange-icon exchange-icon-img" src="/assets/exchanges/%s" alt="%s 图标">' % (filename, esc(label))
     manual_icon = MANUAL_EXCHANGE_ICONS.get(label)
     manual_path = ASSETS.get(manual_icon, ("",))[0] if manual_icon else ""
     if manual_path and os.path.exists(manual_path):
@@ -860,16 +1027,16 @@ def exchange_display(value):
 
 def exchange_options(selected="", include_all=False):
     groups = ['<option value="">全部交易所</option>'] if include_all else []
-    for group_label, names in EXCHANGE_GROUPS:
+    for group_label, items in exchange_groups():
         options = "".join('<option value="%s" %s>%s · %s</option>' % (
-            esc(name), "selected" if selected == name else "", "CEX" if group_label.startswith("CEX") else ("DEX" if group_label.startswith("DEX") else "其他"), esc(name)
-        ) for name in names)
+            esc(item["name"]), "selected" if selected == item["name"] else "", EXCHANGE_GROUP_META[item["group"]]["short"], esc(item["name"])
+        ) for item in items)
         groups.append('<optgroup label="%s">%s</optgroup>' % (esc(group_label), options))
     return "".join(groups)
 
 
 def exchange_picker(selected="", allow_all=False):
-    selected = selected if selected in EXCHANGES else ""
+    selected = selected if selected in active_exchanges() else ""
     groups = []
     required = "" if allow_all else "required"
     if allow_all:
@@ -878,16 +1045,16 @@ def exchange_picker(selected="", allow_all=False):
             '<input type="radio" name="exchange" value="" %s><span>全部交易所</span></label></div>'
             % ("checked" if not selected else "")
         )
-    for group_label, names in EXCHANGE_GROUPS:
+    for group_label, items in exchange_groups():
         items = "".join(
-            '<label class="exchange-option" data-search="%s"><input type="radio" name="exchange" value="%s" %s %s>%s<span>%s</span></label>' % (
-                esc(name.lower()), esc(name), "checked" if name == selected else "", required, exchange_icon_markup(name), esc(name)
-            ) for name in names
+            '<label class="exchange-option" data-search="%s" data-name="%s"><input type="radio" name="exchange" value="%s" %s %s>%s<span>%s</span></label>' % (
+                esc(" ".join([item["name"], *item["aliases"], item["group"], EXCHANGE_GROUP_META[item["group"]]["short"]]).lower()), esc(item["name"].lower()), esc(item["name"]), "checked" if item["name"] == selected else "", required, exchange_icon_markup(item["name"]), esc(item["name"])
+            ) for item in items
         )
         groups.append('<div class="exchange-group"><strong>%s</strong>%s</div>' % (esc(group_label), items))
     empty_label = "全部交易所" if allow_all else "请选择交易所"
     current = exchange_display(selected) if selected else '<span class="muted">%s</span>' % empty_label
-    return """<details class="exchange-picker"><summary data-placeholder="%s">%s</summary><div class="exchange-menu"><input class="exchange-search" type="search" placeholder="搜索交易所名称"><div class="exchange-list">%s</div></div></details>""" % (
+    return """<details class="exchange-picker"><summary data-placeholder="%s">%s</summary><div class="exchange-menu"><input class="exchange-search" type="search" placeholder="搜索交易所名称" autocomplete="off" aria-label="搜索交易所名称"><p class="exchange-search-status" aria-live="polite"></p><div class="exchange-list">%s</div></div></details>""" % (
         empty_label, current, "".join(groups)
     )
 
@@ -944,7 +1111,7 @@ def match_cmc_objects(objects):
         "lfjtraderjoe": "lfjavalanche",
     }
     matched = {}
-    for name in EXCHANGES:
+    for name in active_exchanges():
         if name == "其他":
             continue
         key = normalize_exchange_name(name)
@@ -1041,7 +1208,7 @@ a{color:inherit;text-decoration:none}.layout{display:grid;grid-template-columns:
 .business{margin-top:30px;padding-top:18px;border-top:1px solid rgba(218,229,249,.16)}.business-title{margin:0 5px 10px;color:#d5ad53;font-size:12px;font-weight:800;letter-spacing:1px}.business-item{display:flex;align-items:center;gap:9px;margin:7px 0;padding:9px 10px;border:1px solid rgba(188,207,236,.2);border-radius:8px;background:rgba(255,255,255,.045);color:#f1f5fc;font-size:12px;font-weight:650;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}.business-item:hover{border-color:rgba(213,173,83,.52);background:rgba(255,255,255,.075)}.business-icon{display:inline-grid;place-items:center;flex:0 0 auto;width:24px;height:24px;border:1px solid rgba(213,173,83,.6);border-radius:7px;color:#e2bd68;font-size:13px}
 .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}h1{font-size:25px;margin:0}h2{font-size:18px;margin:0 0 18px}.muted{color:var(--muted)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;box-shadow:0 4px 18px rgba(32,61,103,.05);margin-bottom:18px}
-.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}.col3{grid-column:span 3}.col4{grid-column:span 4}.col6{grid-column:span 6}.col8{grid-column:span 8}.col12{grid-column:span 12}
+.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px}.col2{grid-column:span 2}.col3{grid-column:span 3}.col4{grid-column:span 4}.col6{grid-column:span 6}.col7{grid-column:span 7}.col8{grid-column:span 8}.col9{grid-column:span 9}.col10{grid-column:span 10}.col12{grid-column:span 12}
 label{font-weight:650;display:block;margin:0 0 6px}input,select{width:100%;border:1px solid #cfd9e7;border-radius:9px;padding:10px 12px;background:#fff;font:inherit}
 button,.btn{border:0;border-radius:9px;padding:10px 16px;background:var(--brand);color:#fff;font-weight:700;cursor:pointer;display:inline-block}.secondary{background:#e8eef9;color:#27466f}.danger{background:#c93434}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 10px;border-bottom:1px solid #e7ecf3;white-space:nowrap}th{color:#68768a;font-size:12px}.tablewrap{overflow:auto}
@@ -1054,8 +1221,8 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 10p
 .hero{min-height:170px;display:flex;align-items:flex-end;padding:26px;border-radius:14px;margin-bottom:18px;color:#fff;background:linear-gradient(90deg,rgba(4,16,34,.94),rgba(4,16,34,.35)),url('/assets/crypto-background.jpg') center/cover;box-shadow:0 10px 30px #1023442b}.hero h2{font-size:26px;margin:0 0 6px}.hero p{margin:0;color:#cbd8e8;max-width:620px}
 .exchange-name{display:inline-flex;align-items:center;gap:8px}.exchange-icon{--h:215;display:inline-grid;place-items:center;flex:0 0 auto;width:28px;height:28px;border-radius:9px;color:#fff;background:linear-gradient(135deg,hsl(var(--h) 72% 52%),hsl(var(--h) 72% 34%));font-size:10px;font-weight:850;letter-spacing:-.3px;box-shadow:inset 0 0 0 1px #fff3}
 .exchange-icon-img{display:block;object-fit:cover;background:#fff;border:1px solid #e3e8f0;padding:2px}
-.exchange-picker{position:relative}.exchange-picker>summary{list-style:none;display:flex;align-items:center;min-height:44px;padding:7px 38px 7px 11px;border:1px solid #cfd9e7;border-radius:9px;background:#fff;cursor:pointer;position:relative}.exchange-picker>summary::-webkit-details-marker{display:none}.exchange-picker>summary:after{content:"⌄";position:absolute;right:13px;font-size:18px;color:#66758a}.exchange-picker[open]{z-index:9999}.exchange-picker[open]>summary{border-color:#2457d6}.exchange-menu{position:absolute;z-index:9999;top:calc(100% + 8px);right:0;width:min(520px,88vw);padding:12px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:#111827;color:#f8fafc;box-shadow:0 28px 90px #000b}.exchange-search{margin-bottom:10px;color:#f8fafc;background:#1f2937;border-color:rgba(255,255,255,.12);font-weight:850}.exchange-list{max-height:min(520px,68vh);overflow:auto}.exchange-group>strong{display:block;position:sticky;top:0;padding:10px 11px;background:#1b2433;color:#9fb0c8;font-size:13px;font-weight:950;z-index:1}.exchange-option{display:flex;align-items:center;gap:13px;margin:1px 0;padding:10px 11px;border-radius:12px;cursor:pointer;font-weight:950;color:#f8fafc;letter-spacing:-.35px}.exchange-option span:last-child{color:#f8fafc;font-size:16px;font-weight:950;text-shadow:0 2px 12px #0008}.exchange-option:hover{background:rgba(255,255,255,.075)}.exchange-option input{width:auto;margin:0;accent-color:#3b82f6}.exchange-option input:checked~span:last-child{color:#f6d680;font-weight:950}
-.pager{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:15px}.pager a,.pager .on{display:inline-flex;align-items:center;justify-content:center;min-width:36px;padding:7px 11px;border:1px solid var(--line);border-radius:7px;background:rgba(255,255,255,.07);color:#d8e2f2}.pager a:hover{border-color:rgba(246,214,128,.46);background:rgba(246,214,128,.12);color:#fff}.pager .on{border-color:rgba(246,214,128,.52);background:rgba(246,214,128,.18);color:#f6d680;font-weight:850}.segments .seg{border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.065);color:#dbe6f6}.segments .seg.yes{border-color:rgba(74,222,128,.28);background:rgba(34,197,94,.13);color:#9af7c8}.segments .seg.no{border-color:rgba(251,113,133,.28);background:rgba(248,113,113,.13);color:#fecaca}.stat{font-size:34px;font-weight:850}.ip-intel-grid{grid-template-columns:repeat(4,minmax(0,1fr));align-items:start}.ip-intel-grid .col3{grid-column:span 1}.ip-intel-value{min-height:42px;margin-top:8px;color:#f2f6fd;font-size:16px;font-weight:800;line-height:1.55;overflow-wrap:anywhere;word-break:break-word}.ip-intel-score{font-size:24px;line-height:1.4;color:#f6d680}.actions{display:flex;gap:8px;align-items:end}.inline{display:inline}
+.exchange-picker{position:relative}.exchange-picker>summary{list-style:none;display:flex;align-items:center;min-height:44px;padding:7px 38px 7px 11px;border:1px solid #cfd9e7;border-radius:9px;background:#fff;cursor:pointer;position:relative}.exchange-picker>summary::-webkit-details-marker{display:none}.exchange-picker>summary:after{content:"⌄";position:absolute;right:13px;font-size:18px;color:#66758a}.exchange-picker[open]{z-index:9999}.exchange-picker[open]>summary{border-color:#2457d6}.exchange-menu{position:absolute;z-index:9999;top:calc(100% + 8px);right:0;width:min(520px,88vw);padding:12px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:#111827;color:#f8fafc;box-shadow:0 28px 90px #000b}.exchange-search{margin-bottom:10px;color:#f8fafc;background:#1f2937;border-color:rgba(255,255,255,.12);font-weight:850}.exchange-search-status{min-height:18px;margin:0 0 8px;color:#9fb0c8;font-size:12px;font-weight:750}.exchange-list{max-height:min(520px,68vh);overflow:auto}.exchange-group>strong{display:block;position:sticky;top:0;padding:10px 11px;background:#1b2433;color:#9fb0c8;font-size:13px;font-weight:950;z-index:1}.exchange-picker.is-filtering .exchange-group>strong{display:none}.exchange-picker.is-filtering .exchange-group{padding:0}.exchange-option{display:flex;align-items:center;gap:13px;margin:1px 0;padding:10px 11px;border-radius:12px;cursor:pointer;font-weight:950;color:#f8fafc;letter-spacing:-.35px}.exchange-option[hidden],.exchange-group[hidden]{display:none!important}.exchange-option span:last-child{color:#f8fafc;font-size:16px;font-weight:950;text-shadow:0 2px 12px #0008}.exchange-option:hover{background:rgba(255,255,255,.075)}.exchange-option input{width:auto;margin:0;accent-color:#3b82f6}.exchange-option input:checked~span:last-child{color:#f6d680;font-weight:950}
+.pager{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:15px}.pager a,.pager .on{display:inline-flex;align-items:center;justify-content:center;min-width:36px;padding:7px 11px;border:1px solid var(--line);border-radius:7px;background:rgba(255,255,255,.07);color:#d8e2f2}.pager a:hover{border-color:rgba(246,214,128,.46);background:rgba(246,214,128,.12);color:#fff}.pager .on{border-color:rgba(246,214,128,.52);background:rgba(246,214,128,.18);color:#f6d680;font-weight:850}.segments .seg{border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.065);color:#dbe6f6}.segments .seg.yes{border-color:rgba(74,222,128,.28);background:rgba(34,197,94,.13);color:#9af7c8}.segments .seg.no{border-color:rgba(251,113,133,.28);background:rgba(248,113,113,.13);color:#fecaca}.stat{font-size:34px;font-weight:850}.ip-intel-grid{grid-template-columns:repeat(4,minmax(0,1fr));align-items:start}.ip-intel-grid .col3{grid-column:span 1}.ip-intel-value{min-height:42px;margin-top:8px;color:#f2f6fd;font-size:16px;font-weight:800;line-height:1.55;overflow-wrap:anywhere;word-break:break-word}.ip-intel-score{font-size:24px;line-height:1.4;color:#f6d680}.actions{display:flex;gap:8px;align-items:end}.inline{display:inline}.catalog-filter{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}.catalog-filter input{flex:1 1 280px}.catalog-filter select{min-width:130px}.catalog-edit-form{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:9px;padding:12px;margin-top:8px;min-width:520px;border:1px solid rgba(255,255,255,.10);border-radius:12px;background:rgba(4,10,19,.68)}.catalog-edit-form label{font-size:12px;color:#9fb0c8}.catalog-edit-form input,.catalog-edit-form select{width:100%;margin-top:4px;padding:9px 10px}.catalog-edit-form button{justify-self:start}.catalog-edit-form label:nth-of-type(3){grid-column:1/-1}
 .check-option{display:inline-flex;align-items:center;gap:6px;margin:0 14px 10px 0}.recipient-picker{max-height:220px;overflow:auto;padding:12px;border:1px solid var(--line);border-radius:7px;background:rgba(255,255,255,.03)}textarea{width:100%;min-height:120px;resize:vertical}
 .market-terminal{padding:18px 18px 16px;background:radial-gradient(circle at 20% 0,rgba(246,214,128,.12),transparent 23rem),linear-gradient(145deg,rgba(10,22,38,.92),rgba(3,8,15,.96));border-color:rgba(246,214,128,.16)}
 .market-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.market-kicker{font:900 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.24em;color:#f6d680}.market-live{display:inline-flex;align-items:center;gap:7px;color:#78f6c8;font-size:12px;font-weight:900}.market-live:before{content:"";width:8px;height:8px;border-radius:50%;background:#34d399;box-shadow:0 0 16px #34d399;animation:pulse-dot 1.5s infinite}
@@ -1092,9 +1259,9 @@ table{color:#dbe6f6}th,td{border-bottom:1px solid rgba(255,255,255,.07)}th{color
 .payment-panel{position:relative;overflow:hidden}.payment-panel:before{content:"";position:absolute;right:-80px;top:-100px;width:260px;height:260px;border-radius:50%;background:radial-gradient(circle,rgba(246,214,128,.14),transparent 65%)}.payment-panel>*{position:relative}.payment-panel .hint{margin-top:10px;margin-bottom:20px;line-height:1.75}.payment-panel p{line-height:1.9}.payment-rule{margin-top:14px;padding:14px 16px;border:1px solid rgba(246,214,128,.34);border-radius:16px;background:rgba(246,214,128,.10);color:#fff0bd;font-size:13px;line-height:1.8}.payment-rule strong{color:#f6d680}.pay-address input{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:750;letter-spacing:-.4px}.chain-pill{display:inline-flex;align-items:center;gap:8px;padding:11px 14px;border-radius:16px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.05);font-weight:850}.chain-pill.good{border-color:rgba(34,197,94,.22);background:rgba(34,197,94,.10);color:#86efac}.chain-pill.gold{border-color:rgba(246,214,128,.22);background:rgba(246,214,128,.10);color:#f6d680}
 body:before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.014) 1px,transparent 1px);background-size:54px 54px;mask-image:radial-gradient(circle at 50% 20%,black,transparent 75%)}::selection{background:rgba(246,214,128,.28);color:white}::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:rgba(255,255,255,.025)}::-webkit-scrollbar-thumb{background:linear-gradient(180deg,rgba(246,214,128,.48),rgba(80,92,117,.42));border:2px solid rgba(5,8,15,.95);border-radius:999px}.side{box-shadow:26px 0 92px rgba(0,0,0,.36),inset -1px 0 rgba(246,214,128,.08)}.brandhead{box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 18px 50px rgba(0,0,0,.20)}.card{overflow:hidden}.card:before{content:"";position:absolute;inset:0;background:linear-gradient(135deg,rgba(255,255,255,.07),transparent 35%),linear-gradient(180deg,rgba(255,255,255,.025),transparent 55%);pointer-events:none}.card>*{position:relative;z-index:1}table{border-collapse:separate;border-spacing:0}th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:850}tr{transition:background .16s ease}tbody tr:hover{background:rgba(246,214,128,.035)}.hero,.member-hero{box-shadow:0 38px 120px rgba(0,0,0,.44),inset 0 1px 0 rgba(255,255,255,.09)}.plan-card{box-shadow:0 28px 90px rgba(0,0,0,.32),inset 0 1px 0 rgba(255,255,255,.08)}.plan-card:hover{transform:translateY(-4px)}.gold-text{background:linear-gradient(135deg,#fff7d6,#f6d680 48%,#b98225);-webkit-background-clip:text;background-clip:text;color:transparent}
 .terminal-font, .stat, .market-price, .risk-score, .metric-value{font-family:"JetBrains Mono","SFMono-Regular","Menlo","HarmonyOS Sans","Source Han Sans SC","PingFang SC",monospace}.logo,.market-kicker,.core-label,.hero-kicker{font-family:"Orbitron","JetBrains Mono","SFMono-Regular","HarmonyOS Sans","PingFang SC",sans-serif}.risk-disclaimer{border:1px solid rgba(246,214,128,.20);border-radius:18px;padding:14px 16px;background:linear-gradient(135deg,rgba(246,214,128,.08),rgba(255,255,255,.025));color:#d8cda9;font-size:13px;line-height:1.75}.trust-grid,.risk-dashboard{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.trust-card,.risk-panel{position:relative;border:1px solid rgba(255,255,255,.09);border-radius:22px;padding:18px;background:linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018));box-shadow:inset 0 1px 0 rgba(255,255,255,.06);overflow:hidden}.trust-card:after,.risk-panel:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 0,rgba(255,255,255,.035) 50%,transparent 100%);background-size:100% 9px;opacity:.28;pointer-events:none}.trust-card strong{display:block;margin-top:8px;font-size:28px;color:#f8fbff}.trust-card span,.risk-panel span{color:#8b9ab0;font-size:12px;font-weight:800}.risk-panel h3{margin:0 0 14px;font-size:17px;color:#f8fbff}.risk-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 0;color:#dce7f7}.risk-score{display:inline-flex;padding:6px 9px;border-radius:999px;font-weight:950}.risk-low{background:rgba(34,197,94,.14);color:#86efac}.risk-medium{background:rgba(246,214,128,.13);color:#f6d680}.risk-high{background:rgba(248,113,113,.14);color:#fecaca}.scan-progress{display:none;margin-top:16px;border:1px solid rgba(246,214,128,.16);border-radius:999px;background:rgba(0,0,0,.24);overflow:hidden}.scan-progress span{display:block;width:0;height:10px;background:linear-gradient(90deg,#f6d680,#34d399);box-shadow:0 0 18px rgba(246,214,128,.35);animation:scan-fill 1.35s ease forwards}@keyframes scan-fill{from{width:0}to{width:85%}}form.scanning .scan-progress{display:block}form.scanning button{pointer-events:none;opacity:.82}.market-detail{position:relative;z-index:1;display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:12px;color:#9badc4;font-size:11px;font-weight:800}.market-detail b{color:#e8f1ff}.market-mini{position:relative;z-index:1;margin-top:12px;width:100%;height:34px}.market-mini path{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.market-tile.up .market-mini path{stroke:#34d399;filter:drop-shadow(0 0 8px rgba(52,211,153,.55))}.market-tile.down .market-mini path{stroke:#fb7185;filter:drop-shadow(0 0 8px rgba(251,113,133,.45))}
-.core-query-card{padding:30px 32px}.core-query-card h2{margin-bottom:30px}.core-query-card .grid,.address-check-card .grid{row-gap:22px}.query-action-row{display:flex;align-items:flex-end;gap:16px;padding-top:4px}.address-check-card{margin-top:18px;margin-bottom:26px;border-color:rgba(246,214,128,.18)}.address-check-card h2{margin-bottom:22px}.trust-grid{margin:24px 0 26px}.risk-dashboard{margin:0 0 28px}.payment-panel{margin-top:22px}.plan-order-form{margin-top:20px;display:grid;gap:12px}.plan-order-form select{max-width:180px}.order-box{margin-top:22px;padding:18px;border:1px solid rgba(246,214,128,.16);border-radius:20px;background:rgba(255,255,255,.035)}.verify-form{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:end;margin-top:18px}.verify-form label{grid-column:1/-1}.verify-form input{min-width:0}
+.core-query-card{padding:30px 32px}.core-query-card h2{margin-bottom:30px}.core-query-card .grid,.address-check-card .grid{row-gap:22px}.query-action-row{display:flex;align-items:flex-end;gap:16px;padding-top:4px}.query-action-row button{white-space:nowrap}.address-check-card{margin-top:18px;margin-bottom:26px;border-color:rgba(246,214,128,.18)}.address-check-card h2{margin-bottom:22px}.address-check-card input,.settings-long-input,.pay-address input{min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0}.address-check-card #check-address{font-size:15px}.trust-grid{margin:24px 0 26px}.risk-dashboard{margin:0 0 28px}.payment-panel{margin-top:22px}.plan-order-form{margin-top:20px;display:grid;gap:12px}.plan-order-form select{max-width:180px}.order-box{margin-top:22px;padding:18px;border:1px solid rgba(246,214,128,.16);border-radius:20px;background:rgba(255,255,255,.035)}.verify-form{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:end;margin-top:18px}.verify-form label{grid-column:1/-1}.verify-form input{min-width:0}
 @media(max-width:1180px){.market-dashboard{grid-template-columns:1fr}.market-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.market-tile{min-height:168px}}
-@media(max-width:850px){.layout{display:block}.side{position:static;height:auto;overflow:visible;padding:14px}.brandhead{margin-bottom:12px}.brandmark{width:42px;height:42px}.nav{display:flex;overflow:auto}.nav a{white-space:nowrap}.business{margin-top:12px;padding-top:10px}.business-list{display:flex;gap:8px;overflow-x:auto;padding-bottom:3px}.business-item{min-width:max-content;margin:0}.main{padding:16px}.col3,.col4,.col6,.col8{grid-column:span 12}.ip-intel-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 14px}.ip-intel-grid .col3{grid-column:span 1}.ip-intel-grid .col12{grid-column:1/-1}.ip-intel-value{min-height:0;font-size:15px}.ip-intel-score{font-size:22px}.card{padding:16px}.hero{min-height:145px;padding:20px}.hero h2{font-size:22px}.market-dashboard{grid-template-columns:1fr}.market-panel{min-height:300px}.market-grid,.trust-grid,.risk-dashboard{grid-template-columns:1fr}.market-price{font-size:34px}.market-chart-price{font-size:28px}}
+@media(max-width:850px){.layout{display:block}.side{position:static;height:auto;overflow:visible;padding:14px}.brandhead{margin-bottom:12px}.brandmark{width:42px;height:42px}.nav{display:flex;overflow:auto}.nav a{white-space:nowrap}.business{margin-top:12px;padding-top:10px}.business-list{display:flex;gap:8px;overflow-x:auto;padding-bottom:3px}.business-item{min-width:max-content;margin:0}.main{padding:16px}.col2,.col3,.col4,.col6,.col7,.col8,.col9,.col10{grid-column:span 12}.query-action-row button{width:100%}.ip-intel-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 14px}.ip-intel-grid .col3{grid-column:span 1}.ip-intel-grid .col12{grid-column:1/-1}.ip-intel-value{min-height:0;font-size:15px}.ip-intel-score{font-size:22px}.card{padding:16px}.hero{min-height:145px;padding:20px}.hero h2{font-size:22px}.market-dashboard{grid-template-columns:1fr}.market-panel{min-height:300px}.market-grid,.trust-grid,.risk-dashboard{grid-template-columns:1fr}.market-price{font-size:34px}.market-chart-price{font-size:28px}}
 @media(max-width:850px){.layout{grid-template-columns:1fr}.side{border-right:0}.main{padding:18px}.top h1{font-size:28px}.brandhead{border-radius:18px}.member-hero{grid-template-columns:1fr;min-height:auto}.hero-logo{justify-self:start;width:92px;height:92px}.plan-pro{transform:none}.plan-price{font-size:40px}.hero h2{font-size:30px}}
 """
 
@@ -1182,10 +1349,25 @@ class App(BaseHTTPRequestHandler):
         self.end_headers()
 
     def form(self):
+        content_type = self.headers.get("Content-Type", "")
+        max_length = EXCHANGE_ICON_UPLOAD_MAX_BYTES + 128 * 1024 if content_type.startswith("multipart/form-data") else 1024 * 1024
         try:
-            length = min(int(self.headers.get("Content-Length", "0")), 1024 * 1024)
+            length = min(int(self.headers.get("Content-Length", "0")), max_length)
         except ValueError:
             length = 0
+        if content_type.startswith("multipart/form-data"):
+            if not length:
+                return {}
+            environ = {"REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type, "CONTENT_LENGTH": str(length)}
+            parsed = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ=environ, keep_blank_values=True)
+            values = {}
+            fields = parsed.list or []
+            for field in fields:
+                if field.filename:
+                    values[field.name] = {"filename": field.filename, "data": field.file.read(EXCHANGE_ICON_UPLOAD_MAX_BYTES + 1)}
+                else:
+                    values[field.name] = field.value
+            return values
         parsed = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
         return {key: values if key == "recipient_ids" else values[-1] for key, values in parsed.items()}
 
@@ -1219,9 +1401,9 @@ class App(BaseHTTPRequestHandler):
 
     def page(self, session, title, content, active=""):
         user = session["user"]
-        nav = [("/", "IP风险检测", "home"), ("/markets", "市场监控中心", "markets"), ("/membership", "权限中心", "membership"), ("/history", "查询历史", "history")]
+        nav = [("/", "IP风险检测", "home"), ("/wallet", "钱包检测专区", "wallet"), ("/markets", "市场监控中心", "markets"), ("/membership", "权限中心", "membership"), ("/history", "查询历史", "history")]
         if user["is_owner"]:
-            nav += [("/analytics", "会员数据", "analytics"), ("/users", "用户管理", "users"), ("/logs", "操作日志", "logs"), ("/settings", "系统设置", "settings")]
+            nav += [("/analytics", "会员数据", "analytics"), ("/users", "用户管理", "users"), ("/exchanges", "交易所管理", "exchanges"), ("/logs", "操作日志", "logs"), ("/settings", "系统设置", "settings")]
         links = "".join('<a class="%s" href="%s">%s</a>' % ("on" if active == key else "", url, label) for url, label, key in nav)
         business = "".join(
             '<div class="business-item"><span class="business-icon">%s</span><span>%s</span></div>' % (esc(icon), esc(label))
@@ -1229,7 +1411,7 @@ class App(BaseHTTPRequestHandler):
         )
         return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s · 原石金手指</title><style>%s</style></head>
         <body><div class="layout"><aside class="side"><div class="brandhead"><img class="brandmark" src="/assets/ck-logo.jpg" alt="CK原石图标"><div class="logo">原石金手指<small>WEB3 风控终端</small></div></div><nav class="nav">%s</nav><section class="business"><div class="business-title">核心业务矩阵</div><div class="business-list">%s</div></section></aside>
-        <main class="main"><div class="top"><div><h1>%s</h1><div class="muted">Gold Finger · Web3 用户增长 / 安全风控 / 女巫检测 / 钱包画像</div></div><div>%s · %s　<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="%s"><button class="secondary">退出</button></form></div></div>%s<div class="contact">产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>　·　<a href="https://t.me/B132609" target="_blank" rel="noopener noreferrer">技术业务交流群</a></div></main></div><script src="/assets/exchange-picker.js?v=20260801-5" defer></script><script src="/assets/market-ticker.js?v=20260801-5" defer></script></body></html>""" % (
+        <main class="main"><div class="top"><div><h1>%s</h1><div class="muted">Gold Finger · Web3 用户增长 / 安全风控 / 女巫检测 / 钱包画像</div></div><div>%s · %s　<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="%s"><button class="secondary">退出</button></form></div></div>%s<div class="contact">产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>　·　<a href="https://t.me/B132609" target="_blank" rel="noopener noreferrer">技术业务交流群</a></div></main></div><script src="/assets/exchange-picker.js?v=20260808-2" defer></script><script src="/assets/market-ticker.js?v=20260801-5" defer></script></body></html>""" % (
             esc(title), STYLE, links, business, esc(title), esc(user["username"]), user_display_label(user), session["csrf"], content
         )
 
@@ -1288,6 +1470,8 @@ class App(BaseHTTPRequestHandler):
             return self.send_html("OK")
         if path == "/":
             return self.home(query)
+        if path == "/wallet":
+            return self.wallet(query)
         if path == "/history":
             return self.history(query)
         if path == "/markets":
@@ -1308,6 +1492,8 @@ class App(BaseHTTPRequestHandler):
             return self.logs(query)
         if path == "/settings":
             return self.settings(query)
+        if path == "/exchanges":
+            return self.exchanges(query)
         self.send_html("Not Found", 404)
 
     def do_POST(self):
@@ -1354,6 +1540,14 @@ class App(BaseHTTPRequestHandler):
             return self.send_smtp_test()
         if path == "/settings/announcement":
             return self.send_announcement()
+        if path == "/exchanges/create":
+            return self.create_exchange()
+        if path == "/exchanges/update":
+            return self.update_exchange()
+        if path == "/exchanges/toggle":
+            return self.toggle_exchange()
+        if path == "/exchanges/move":
+            return self.move_exchange()
         self.send_html("Not Found", 404)
 
     def login(self):
@@ -1528,21 +1722,46 @@ class App(BaseHTTPRequestHandler):
         <div class="card core-query-card"><h2>开始 IP 风险检测</h2><form method="post" action="/query" id="risk-query-form"><input type="hidden" name="csrf" value="%s"><div class="grid">
         <div class="col8"><label>IPv4 地址</label><input name="ip" placeholder="例如：192.168.1.10" required></div><div class="col4"><label>交易所</label>%s</div>
         <div class="col12 query-action-row"><button id="risk-submit">启动扫描并自动入库</button><div class="scan-progress"><span></span></div></div></div></form></div>
-        <div class="card address-check-card"><h2>钱包 / 交互地址检测</h2><p class="muted">链上公开数据与平台内部授权数据分开处理；钱包地址不能反查真实 IP。</p><form method="post" action="/wallet-check" id="address-check-form"><input type="hidden" name="csrf" value="%s"><div class="grid">
-        <div class="col3"><label>检测类型</label><select name="check_type" id="check-type">%s</select></div>
-        <div class="col7"><label id="address-label">钱包地址</label><input name="address" id="check-address" placeholder="请输入钱包地址" required></div>
-        <div class="col2 query-action-row"><button id="address-submit">开始检测</button></div></div></form></div>
         <div class="grid trust-grid"><div class="trust-card"><span>总检测次数</span><strong>%s</strong></div><div class="trust-card"><span>分析钱包</span><strong>%s</strong></div><div class="trust-card"><span>风险地址</span><strong>%s</strong></div><div class="trust-card"><span>覆盖交易所</span><strong>10 CEX / 7 DEX</strong></div></div>
         <div class="risk-dashboard"><div class="risk-panel"><h3>AI 市场雷达</h3><div class="risk-row"><span>BTC</span><b>震荡</b></div><div class="risk-row"><span>ETH</span><b>弱势</b></div><div class="risk-row"><span>SOL</span><b>强势</b></div><div class="risk-row"><span>山寨风险</span><b class="risk-score risk-medium">中等</b></div></div>
         <div class="risk-panel"><h3>风险监控中心</h3><div class="risk-row"><span>总检测</span><b>%s</b></div><div class="risk-row"><span>今日新增风险</span><b>%s</b></div><div class="risk-row"><span>高风险</span><b class="risk-score risk-high">%s</b></div><div class="risk-row"><span>安全指数</span><b class="risk-score risk-low">暂无实时基线</b></div><p class="muted">大额转账、交易所异动、项目方异动、黑名单与女巫集群需接入风控规则库后统计。</p></div>
         <div class="risk-panel"><h3>IP 女巫检测</h3><div class="risk-row"><span>授权 IP 记录</span><b>%s</b></div><div class="risk-row"><span>关联设备指纹</span><b>未采集</b></div><div class="risk-row"><span>代理 / VPN / Tor</span><b>待接入 IP 数据源</b></div><p class="muted">仅分析平台内部已授权的登录、设备与风控日志；链上钱包不能直接获取真实 IP。</p></div>
-        <div class="risk-panel"><h3>钱包画像</h3><div class="risk-row"><span>主要活跃链</span><b>按实时查询返回</b></div><div class="risk-row"><span>资产 / 持仓变化</span><b>待接入价格源</b></div><div class="risk-row"><span>女巫 / 工作室判断</span><b class="risk-score">待规则库</b></div><p class="muted">DEX/CEX 交互、NFT、空投、合约频率仅在对应数据源返回时展示。</p></div></div>
+        <div class="risk-panel"><h3>钱包检测专区</h3><div class="risk-row"><span>主要活跃链</span><b>按实时查询返回</b></div><div class="risk-row"><span>资产 / 持仓变化</span><b>待接入价格源</b></div><div class="risk-row"><span>女巫 / 工作室判断</span><b class="risk-score">待规则库</b></div><p class="muted">钱包地址、交互地址、DEX/CEX、NFT、空投和合约频率请在钱包检测专区查询。</p><a class="btn secondary" href="/wallet">进入钱包检测专区</a></div></div>
         <div class="card"><h2>最近检测记录</h2><p class="muted">查询用户信息默认脱敏。仅总管理员可查看完整身份、完整钱包和完整日志；完整 CSV 导出也仅限总管理员。</p><div class="tablewrap"><table><thead><tr><th>IP</th><th>交易所</th><th>相似度</th><th>查询用户</th><th>次数</th><th>最近查询</th></tr></thead><tbody>%s</tbody></table></div></div>
-        <script>document.addEventListener("DOMContentLoaded",function(){var f=document.getElementById("risk-query-form"),b=document.getElementById("risk-submit"),af=document.getElementById("address-check-form"),t=document.getElementById("check-type"),a=document.getElementById("check-address"),l=document.getElementById("address-label"),ab=document.getElementById("address-submit"),types=%s;function sync(){var x=types[t.value];a.placeholder=x.placeholder;l.textContent=x.label;af.action=x.kind==="ip"?"/query":"/wallet-check";}if(f&&b)f.addEventListener("submit",function(){f.classList.add("scanning");b.textContent="正在分析网络环境...";});if(af&&t){sync();t.addEventListener("change",sync);af.addEventListener("submit",function(){ab.textContent="查询中...";ab.disabled=true;});}});</script>""" % (
-            session["csrf"], exchange_picker(), session["csrf"], "".join('<option value="%s">%s</option>' % (esc(key), esc(item["label"])) for key, item in CHECK_TYPES.items()), total_checks, wallet_total, high_risk,
-            total_checks, new_today, high_risk, total_checks, rows, json.dumps(CHECK_TYPES, ensure_ascii=False)
+        <script>document.addEventListener("DOMContentLoaded",function(){var f=document.getElementById("risk-query-form"),b=document.getElementById("risk-submit");if(f&&b)f.addEventListener("submit",function(){f.classList.add("scanning");b.textContent="正在分析网络环境...";});});</script>""" % (
+            session["csrf"], exchange_picker(), total_checks, wallet_total, high_risk,
+            total_checks, new_today, high_risk, total_checks, rows
         )
         self.send_html(self.page(session, "IP风险检测", content, "home"))
+
+    def wallet(self, query):
+        session = self.require_user()
+        if not session:
+            return
+        message = query.get("message", [""])[0]
+        flash = '<div class="flash">%s</div>' % esc(message) if message else ""
+        with db() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM wallet_checks").fetchone()[0]
+            high_risk = conn.execute("SELECT COUNT(*) FROM wallet_checks WHERE risk_score >= 70").fetchone()[0]
+            recent = conn.execute("SELECT check_type,address,risk_score,created_at FROM wallet_checks WHERE user_id=? ORDER BY id DESC LIMIT 8", (session["user"]["id"],)).fetchall()
+        rows = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
+            esc(CHECK_TYPES.get(row["check_type"], CHECK_TYPES["wallet"])["label"]),
+            esc(row["address"] if viewer_can_export_full(session["user"]) else mask_wallet_address(row["address"])),
+            esc(str(row["risk_score"]) if row["risk_score"] is not None else "待接入"),
+            esc(row["created_at"]),
+        ) for row in recent) or '<tr><td colspan="4" class="muted">暂无钱包检测记录</td></tr>'
+        options = "".join('<option value="%s">%s</option>' % (esc(key), esc(item["label"])) for key, item in CHECK_TYPES.items() if item["kind"] != "ip")
+        content = flash + """<div class="hero"><div><span class="hero-kicker">GOLD FINGER · WALLET INTELLIGENCE</span><h2>钱包检测专区</h2><p>统一分析多链钱包、交互地址与公开链上风险数据；平台内部授权数据不会与链上公开数据混淆展示。</p></div></div>
+        <div class="card address-check-card"><h2>钱包 / 交互地址检测</h2><p class="muted">支持通用钱包、钱包交互地址、EVM、Solana、TRON、BTC 和其他链地址。未配置真实数据源时会明确返回配置状态，不生成模拟检测结果。</p><form method="post" action="/wallet-check" id="address-check-form"><input type="hidden" name="csrf" value="%s"><div class="grid">
+        <div class="col2"><label>检测类型</label><select name="check_type" id="check-type">%s</select></div>
+        <div class="col8"><label id="address-label">钱包地址</label><input name="address" id="check-address" placeholder="请输入钱包地址" spellcheck="false" autocomplete="off" required></div>
+        <div class="col2 query-action-row"><button id="address-submit">开始检测</button></div></div></form></div>
+        <div class="grid trust-grid"><div class="trust-card"><span>钱包检测次数</span><strong>%s</strong></div><div class="trust-card"><span>高风险地址</span><strong>%s</strong></div><div class="trust-card"><span>支持地址类型</span><strong>7</strong></div><div class="trust-card"><span>数据模式</span><strong>实时 / 配置化</strong></div></div>
+        <div class="card"><h2>最近钱包检测记录</h2><p class="muted">地址按权限脱敏显示。完整用户身份和完整查询日志仅总管理员可查看。</p><div class="tablewrap"><table><thead><tr><th>检测类型</th><th>钱包地址</th><th>风险评分</th><th>检测时间</th></tr></thead><tbody>%s</tbody></table></div></div>
+        <script>document.addEventListener("DOMContentLoaded",function(){var f=document.getElementById("address-check-form"),t=document.getElementById("check-type"),a=document.getElementById("check-address"),l=document.getElementById("address-label"),b=document.getElementById("address-submit"),types=%s;function sync(){var x=types[t.value];a.placeholder=x.placeholder;l.textContent=x.label;}sync();t.addEventListener("change",sync);f.addEventListener("submit",function(){b.textContent="查询中...";b.disabled=true;});});</script>""" % (
+            session["csrf"], options, total, high_risk, rows, json.dumps(CHECK_TYPES, ensure_ascii=False)
+        )
+        self.send_html(self.page(session, "钱包检测专区", content, "wallet"))
 
     def market_tickers(self):
         if not self.session():
@@ -1889,7 +2108,7 @@ class App(BaseHTTPRequestHandler):
                 raise ValueError()
         except ValueError:
             return self.redirect("/?message=" + urllib.parse.quote("请输入合法的 IPv4 / IPv6 地址。"))
-        if exchange not in EXCHANGES:
+        if exchange not in active_exchanges():
             return self.redirect("/?message=" + urllib.parse.quote("请选择有效的交易所。"))
         is_ipv4 = parsed.version == 4
         seg = [int(x) for x in raw_ip.split(".")] if is_ipv4 else [0, 0, 0, 0]
@@ -1953,7 +2172,7 @@ class App(BaseHTTPRequestHandler):
             check_type = "wallet"
         valid, chain = check_address(address, check_type)
         if not valid:
-            return self.redirect("/?message=" + urllib.parse.quote(CHECK_TYPES[check_type]["placeholder"]))
+            return self.redirect("/wallet?message=" + urllib.parse.quote(CHECK_TYPES[check_type]["placeholder"]))
         snapshot = live_wallet_snapshot(address, chain)
         ts = now()
         with db() as conn:
@@ -1966,10 +2185,10 @@ class App(BaseHTTPRequestHandler):
         missing = "、".join(snapshot["missingFields"])
         content = """<div class="card"><h2>%s</h2><div class="grid"><div class="col6"><div class="muted">钱包地址 / 所属链</div><div class="stat" style="font-size:22px;word-break:break-all">%s<br><small>%s %s</small></div></div><div class="col2"><div class="muted">地址类型</div><div class="stat">%s</div></div><div class="col2"><div class="muted">风险评分</div><div class="stat">%s</div></div><div class="col2"><div class="muted">风险等级</div><div class="stat">%s</div></div><div class="col12"><div class="segments"><span class="seg">数据来源：%s</span><span class="seg">更新时间：%s</span><span class="seg">耗时：%sms</span><span class="seg">可信度：%s</span><span class="seg">%s</span></div></div></div></div>
         <div class="card"><h2>资产与钱包画像</h2><p class="muted">总资产估值：%s；持仓价格、资产占比、交易次数、CEX/DEX/NFT/空投/合约活跃度、钱包年龄、批量注册、工作室与女巫判断，均仅在真实数据源可用时显示。</p><div class="tablewrap"><table><thead><tr><th>币种</th><th>余额</th><th>实时价格</th><th>资产占比</th></tr></thead><tbody>%s</tbody></table></div></div>
-        <div class="card"><h2>钱包交互地址分析</h2><p class="muted">交互地址、链、类型、CEX/DEX、风险、项目方、次数、金额、首次/最近交互及风险标签需要链上索引或授权标签库。当前状态：%s</p><p class="muted">交互列表支持风险/链/CEX-DEX 筛选、次数/金额排序、分页与 CSV 导出；在数据源未接入前不生成虚构列表。缺失字段：%s。</p></div><a class="btn secondary" href="/">返回继续检测</a>""" % (
+        <div class="card"><h2>钱包交互地址分析</h2><p class="muted">交互地址、链、类型、CEX/DEX、风险、项目方、次数、金额、首次/最近交互及风险标签需要链上索引或授权标签库。当前状态：%s</p><p class="muted">交互列表支持风险/链/CEX-DEX 筛选、次数/金额排序、分页与 CSV 导出；在数据源未接入前不生成虚构列表。缺失字段：%s。</p></div><a class="btn secondary" href="/wallet">返回继续检测</a>""" % (
             esc(CHECK_TYPES[check_type]["label"] + "结果"), esc(address), icon_markup(CHAIN_ICON_MAP, chain), esc((CHAIN_ICON_MAP.get(chain) or FALLBACK_ICON)["name"]), esc(snapshot["addressType"]), esc(snapshot["riskScore"] if snapshot["riskScore"] is not None else "待接入"), esc(snapshot["riskLevel"]), esc(snapshot["source"]), esc(snapshot["updatedAt"]), snapshot["durationMs"], esc(snapshot["confidence"]), "实时数据" if snapshot["isRealtime"] else "非实时 / 未配置", esc(snapshot["totalValue"] if snapshot["totalValue"] is not None else "待接入"), assets, esc(snapshot["message"]), esc(missing)
         )
-        self.send_html(self.page(session, "地址检测结果", content, "home"))
+        self.send_html(self.page(session, "地址检测结果", content, "wallet"))
 
     def create_membership_order(self):
         session = self.require_user()
@@ -2405,6 +2624,175 @@ class App(BaseHTTPRequestHandler):
         content = '<div class="card"><h2>最近 500 条操作</h2><div class="tablewrap"><table><thead><tr><th>时间</th><th>用户</th><th>操作</th><th>对象</th><th>详情</th></tr></thead><tbody>%s</tbody></table></div></div>' % rows
         self.send_html(self.page(session, "操作日志", content, "logs"))
 
+    def exchange_admin_session(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return None
+        if not session["user"]["is_owner"]:
+            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">备用管理员只能使用查询，不能维护交易所目录。</p></div>'), 403)
+            return None
+        return session
+
+    def exchange_form_values(self, form, catalog, current_id=""):
+        name = form.get("name", "").strip()
+        group = form.get("group", "").strip().lower()
+        aliases = []
+        for alias in form.get("aliases", "").replace("\n", ",").split(","):
+            alias = alias.strip()
+            if alias and alias.casefold() != name.casefold() and alias.casefold() not in {value.casefold() for value in aliases}:
+                aliases.append(alias)
+        icon_file = form.get("icon_file", "").strip().lower()
+        icon_text = form.get("icon_text", "").strip()
+        if not name or len(name) > 80 or group not in EXCHANGE_GROUP_META:
+            raise ValueError("请填写 1-80 个字符的名称，并选择有效分组。")
+        if len(aliases) > 20 or any(len(alias) > 80 for alias in aliases):
+            raise ValueError("搜索别名最多 20 个，每个不超过 80 个字符。")
+        if icon_file and not EXCHANGE_ICON_FILE_RE.fullmatch(icon_file):
+            raise ValueError("图标缓存文件名必须是 32 位小写哈希加 .png，例如 0123...abcd.png。")
+        if len(icon_text) > 6:
+            raise ValueError("备用图标文字最多 6 个字符。")
+        for item in catalog["items"]:
+            if item["id"] != current_id and item["name"].casefold() == name.casefold():
+                raise ValueError("交易所名称已存在，请使用不同名称或编辑现有项目。")
+        return {"name": name, "group": group, "aliases": aliases, "icon_file": icon_file, "icon_text": icon_text}
+
+    def exchange_icon_from_upload(self, form, values):
+        upload = form.get("icon_upload")
+        if not isinstance(upload, dict) or not upload.get("filename"):
+            return values
+        values["icon_file"] = save_uploaded_exchange_icon(upload.get("data", b""))
+        return values
+
+    def exchanges(self, query):
+        session = self.exchange_admin_session()
+        if not session:
+            return
+        message = query.get("message", [""])[0]
+        keyword = query.get("q", [""])[0].strip().lower()
+        group_filter = query.get("group", ["all"])[0].lower()
+        status_filter = query.get("status", ["all"])[0].lower()
+        if group_filter not in ("all", *EXCHANGE_GROUP_META):
+            group_filter = "all"
+        if status_filter not in ("all", "enabled", "disabled"):
+            status_filter = "all"
+        catalog = load_exchange_catalog()
+        all_items = exchange_catalog_items(False)
+        filtered = []
+        for item in all_items:
+            searchable = " ".join([item["name"], *item["aliases"], item["group"]]).lower()
+            if keyword and keyword not in searchable:
+                continue
+            if group_filter != "all" and item["group"] != group_filter:
+                continue
+            if status_filter == "enabled" and not item["enabled"]:
+                continue
+            if status_filter == "disabled" and item["enabled"]:
+                continue
+            filtered.append(item)
+        group_options = '<option value="all">全部分组</option>' + "".join('<option value="%s"%s>%s</option>' % (group, " selected" if group_filter == group else "", esc(meta["label"])) for group, meta in EXCHANGE_GROUP_META.items())
+        status_options = "".join('<option value="%s"%s>%s</option>' % (value, " selected" if status_filter == value else "", label) for value, label in (("all", "全部状态"), ("enabled", "已启用"), ("disabled", "已停用")))
+        rows = []
+        for item in filtered:
+            cached = bool(item["icon_file"] and (os.path.exists(os.path.join(CMC_ICON_DIR, item["icon_file"])) or os.path.exists(os.path.join(BRAND_DIR, "exchanges", item["icon_file"]))))
+            icon_state = "已验证本地缓存" if cached else ("缓存文件未找到" if item["icon_file"] else "自动图标 / 备用图标")
+            rows.append("""<tr><td>%s</td><td>%s</td><td><strong>%s</strong><br><span class=\"muted\">%s</span></td><td>%s</td><td>%s</td><td>%s</td><td><details><summary>编辑</summary><form method=\"post\" action=\"/exchanges/update\" enctype=\"multipart/form-data\" class=\"catalog-edit-form\"><input type=\"hidden\" name=\"csrf\" value=\"%s\"><input type=\"hidden\" name=\"id\" value=\"%s\"><label>名称<input name=\"name\" value=\"%s\" maxlength=\"80\" required></label><label>分组<select name=\"group\">%s</select></label><label>搜索别名<input name=\"aliases\" value=\"%s\" placeholder=\"英文名, 中文别名\"></label><label>上传图标<input name=\"icon_upload\" type=\"file\" accept=\"image/png,image/jpeg,image/webp\"></label><label>图标缓存文件名<input name=\"icon_file\" value=\"%s\" placeholder=\"32 位哈希.png\"></label><label>备用图标文字<input name=\"icon_text\" value=\"%s\" maxlength=\"6\"></label><button>保存修改</button></form></details></td><td><form class=\"inline\" method=\"post\" action=\"/exchanges/move\"><input type=\"hidden\" name=\"csrf\" value=\"%s\"><input type=\"hidden\" name=\"id\" value=\"%s\"><button class=\"secondary\" name=\"direction\" value=\"up\" title=\"在同组内上移\">上移</button><button class=\"secondary\" name=\"direction\" value=\"down\" title=\"在同组内下移\">下移</button></form><form class=\"inline\" method=\"post\" action=\"/exchanges/toggle\"><input type=\"hidden\" name=\"csrf\" value=\"%s\"><input type=\"hidden\" name=\"id\" value=\"%s\"><button class=\"%s\">%s</button></form></td></tr>""" % (
+                item["order"], exchange_icon_markup(item["name"]), esc(item["name"]), esc("、".join(item["aliases"]) or "无别名"), esc(EXCHANGE_GROUP_META[item["group"]]["short"]), esc(icon_state), '<span class="badge s0">已启用</span>' if item["enabled"] else '<span class="badge">已停用</span>', session["csrf"], esc(item["id"]), esc(item["name"]), "".join('<option value="%s"%s>%s</option>' % (group, " selected" if item["group"] == group else "", esc(meta["label"])) for group, meta in EXCHANGE_GROUP_META.items()), esc(", ".join(item["aliases"])), esc(item["icon_file"]), esc(item["icon_text"]), session["csrf"], esc(item["id"]), session["csrf"], esc(item["id"]), "danger" if item["enabled"] else "secondary", "停用" if item["enabled"] else "恢复"
+            ))
+        flash = '<div class="flash">%s</div>' % esc(message) if message else ""
+        rows_html = "".join(rows) or '<tr><td colspan="8" class="muted">没有匹配的交易所目录项。</td></tr>'
+        content = flash + """<div class="hero"><div><h2>交易所管理</h2><p>维护 IP 风险检测中可选择的 CEX、DEX 与其他交易所。名称、别名、分组和同组排序保存后立即同步到检测下拉搜索；停用后不影响已有历史记录。</p></div></div>
+        <div class="card"><h2>新增交易所 / 协议</h2><form method="post" action="/exchanges/create" enctype="multipart/form-data"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col4"><label>名称</label><input name="name" maxlength="80" placeholder="例如 Jupiter" required></div><div class="col2"><label>分组</label><select name="group"><option value="cex">CEX</option><option value="dex">DEX</option><option value="other">其他</option></select></div><div class="col6"><label>搜索别名</label><input name="aliases" maxlength="800" placeholder="例如 币安, Binance Exchange；用英文逗号分隔"></div><div class="col6"><label>上传图标（可选）</label><input name="icon_upload" type="file" accept="image/png,image/jpeg,image/webp"><p class="hint">支持 PNG、JPG、WebP，最大 4 MB。上传后会自动校验、等比缩放并居中输出为 256 × 256 PNG。</p></div><div class="col3"><label>图标缓存文件名（可选）</label><input name="icon_file" placeholder="已同步 CMC 的 32 位哈希.png" spellcheck="false"></div><div class="col3"><label>备用图标文字</label><input name="icon_text" maxlength="6" placeholder="JUP"></div><div class="col3 query-action-row"><button>新增并启用</button></div></div></form></div>
+        <div class="card"><h2>目录列表</h2><form method="get" action="/exchanges" class="catalog-filter"><input name="q" value="%s" placeholder="搜索名称、别名或分组"><select name="group">%s</select><select name="status">%s</select><button class="secondary">筛选</button></form><p class="muted">共 %s 条匹配，当前启用 %s 条。图标缓存可在“系统设置 - CoinMarketCap 官方图标”同步后填写到相应项目。</p><div class="tablewrap"><table><thead><tr><th>排序</th><th>图标</th><th>名称 / 别名</th><th>分组</th><th>图标状态</th><th>状态</th><th>编辑</th><th>操作</th></tr></thead><tbody>%s</tbody></table></div></div>""" % (session["csrf"], esc(keyword), group_options, status_options, len(filtered), len(exchange_catalog_items(True)), rows_html)
+        self.send_html(self.page(session, "交易所管理", content, "exchanges"))
+
+    def create_exchange(self):
+        session = self.exchange_admin_session()
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form):
+            return self.send_html("Forbidden", 403)
+        catalog = load_exchange_catalog()
+        try:
+            values = self.exchange_form_values(form, catalog)
+            values = self.exchange_icon_from_upload(form, values)
+        except ValueError as error:
+            return self.redirect("/exchanges?message=" + urllib.parse.quote(str(error)))
+        order = 1 + max((item["order"] for item in catalog["items"] if item["group"] == values["group"]), default=0)
+        item = {"id": "custom-" + secrets.token_hex(8), **values, "order": order, "enabled": True, "created_at": now(), "updated_at": now()}
+        catalog["items"].append(item)
+        save_exchange_catalog(catalog)
+        with db() as conn:
+            log_action(conn, session["user"]["id"], "CREATE_EXCHANGE", "EXCHANGE_CATALOG", item["id"], detail="新增 %s（%s）" % (item["name"], item["group"]))
+        self.redirect("/exchanges?message=" + urllib.parse.quote("已新增并启用 %s，IP 检测搜索已同步。" % item["name"]))
+
+    def update_exchange(self):
+        session = self.exchange_admin_session()
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form):
+            return self.send_html("Forbidden", 403)
+        catalog = load_exchange_catalog()
+        item = next((value for value in catalog["items"] if value["id"] == form.get("id", "")), None)
+        if not item:
+            return self.redirect("/exchanges?message=" + urllib.parse.quote("未找到要编辑的交易所。"))
+        try:
+            values = self.exchange_form_values(form, catalog, item["id"])
+            values = self.exchange_icon_from_upload(form, values)
+        except ValueError as error:
+            return self.redirect("/exchanges?message=" + urllib.parse.quote(str(error)))
+        old_name, old_group = item["name"], item["group"]
+        item.update(values)
+        if old_group != item["group"]:
+            item["order"] = 1 + max((value["order"] for value in catalog["items"] if value["group"] == item["group"] and value["id"] != item["id"]), default=0)
+        item["updated_at"] = now()
+        save_exchange_catalog(catalog)
+        with db() as conn:
+            log_action(conn, session["user"]["id"], "UPDATE_EXCHANGE", "EXCHANGE_CATALOG", item["id"], detail="%s 更新为 %s（%s）" % (old_name, item["name"], item["group"]))
+        self.redirect("/exchanges?message=" + urllib.parse.quote("交易所目录已更新，检测搜索已同步。"))
+
+    def toggle_exchange(self):
+        session = self.exchange_admin_session()
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form):
+            return self.send_html("Forbidden", 403)
+        catalog = load_exchange_catalog()
+        item = next((value for value in catalog["items"] if value["id"] == form.get("id", "")), None)
+        if not item:
+            return self.redirect("/exchanges?message=" + urllib.parse.quote("未找到要操作的交易所。"))
+        item["enabled"] = not item["enabled"]
+        item["updated_at"] = now()
+        save_exchange_catalog(catalog)
+        with db() as conn:
+            log_action(conn, session["user"]["id"], "TOGGLE_EXCHANGE", "EXCHANGE_CATALOG", item["id"], detail="%s：%s" % (item["name"], "启用" if item["enabled"] else "停用"))
+        self.redirect("/exchanges?message=" + urllib.parse.quote("已%s %s；历史记录不会受影响。" % ("恢复" if item["enabled"] else "停用", item["name"])))
+
+    def move_exchange(self):
+        session = self.exchange_admin_session()
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form):
+            return self.send_html("Forbidden", 403)
+        direction = form.get("direction", "")
+        catalog = load_exchange_catalog()
+        item = next((value for value in catalog["items"] if value["id"] == form.get("id", "")), None)
+        if not item or direction not in ("up", "down"):
+            return self.redirect("/exchanges?message=" + urllib.parse.quote("排序请求不正确。"))
+        siblings = sorted((value for value in catalog["items"] if value["group"] == item["group"]), key=lambda value: (value["order"], value["name"].casefold()))
+        index = next(index for index, value in enumerate(siblings) if value["id"] == item["id"])
+        swap_index = index - 1 if direction == "up" else index + 1
+        if 0 <= swap_index < len(siblings):
+            siblings[index]["order"], siblings[swap_index]["order"] = siblings[swap_index]["order"], siblings[index]["order"]
+            siblings[index]["updated_at"] = siblings[swap_index]["updated_at"] = now()
+            save_exchange_catalog(catalog)
+            with db() as conn:
+                log_action(conn, session["user"]["id"], "MOVE_EXCHANGE", "EXCHANGE_CATALOG", item["id"], detail="%s 在 %s 分组内%s" % (item["name"], item["group"], "上移" if direction == "up" else "下移"))
+        self.redirect("/exchanges?message=" + urllib.parse.quote("排序已更新。"))
+
     def settings(self, query):
         session = self.require_user(admin=True)
         if not session:
@@ -2498,14 +2886,14 @@ class App(BaseHTTPRequestHandler):
         <p>推荐地址安全源：<strong>GoPlus Security</strong>。它适合先接入基础地址安全、恶意/钓鱼合约与代币风险信息；RPC 负责真实余额。更完整的 CEX 标签、资金追踪、制裁与 AML 风险可在下方接入商业标签库。</p>
         <p class="muted">所有接口仅由服务端调用。密钥保存到 <code>local_data/web3_risk.json</code>（权限 600），保存后不会在后台回显明文、不会写入操作日志或 GitHub。</p>
         <form method="post" action="/settings/web3-risk"><input type="hidden" name="csrf" value="%s"><div class="grid">
-        <div class="col6"><label>EVM RPC URL</label><input name="evm_rpc_url" value="%s" placeholder="https://eth-mainnet.g.alchemy.com/v2/..."><p class="hint">用于 EVM 原生币余额。推荐 Alchemy、Infura、QuickNode 或自建节点。</p></div>
-        <div class="col6"><label>Solana RPC URL</label><input name="solana_rpc_url" value="%s" placeholder="https://api.mainnet-beta.solana.com"><p class="hint">用于 SOL 原生币余额。推荐 Helius、QuickNode 或自建节点。</p></div>
-        <div class="col4"><label>启用 GoPlus 地址安全</label><select name="goplus_enabled"><option value="0"%s>未启用</option><option value="1"%s>启用</option></select></div>
-        <div class="col8"><label>GoPlus API Base URL</label><input name="goplus_base_url" value="%s" placeholder="https://api.gopluslabs.io/api/v1"></div>
+        <div class="col6"><label>EVM RPC URL</label><input class="settings-long-input" name="evm_rpc_url" value="%s" placeholder="https://eth-mainnet.g.alchemy.com/v2/..." spellcheck="false"><p class="hint">用于 EVM 原生币余额。推荐 Alchemy、Infura、QuickNode 或自建节点。</p></div>
+        <div class="col6"><label>Solana RPC URL</label><input class="settings-long-input" name="solana_rpc_url" value="%s" placeholder="https://api.mainnet-beta.solana.com" spellcheck="false"><p class="hint">用于 SOL 原生币余额。推荐 Helius、QuickNode 或自建节点。</p></div>
+        <div class="col3"><label>启用 GoPlus 地址安全</label><select name="goplus_enabled"><option value="0"%s>未启用</option><option value="1"%s>启用</option></select></div>
+        <div class="col9"><label>GoPlus API Base URL</label><input class="settings-long-input" name="goplus_base_url" value="%s" placeholder="https://api.gopluslabs.io/api/v1" spellcheck="false"></div>
         <div class="col12"><label>GoPlus API Key（如套餐要求）</label><input name="goplus_api_key" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥；免费接口通常无需填写"><p class="hint">建议先使用 GoPlus 的免费/低门槛地址安全能力；具体限额、链支持和授权以供应商当前文档为准。</p></div>
-        <div class="col6"><label>地址标签 / AML API URL</label><input name="label_api_url" value="%s" placeholder="例如已采购的 AML、CEX/DEX 地址标签 API 地址"></div>
+        <div class="col6"><label>地址标签 / AML API URL</label><input class="settings-long-input" name="label_api_url" value="%s" placeholder="例如已采购的 AML、CEX/DEX 地址标签 API 地址" spellcheck="false"></div>
         <div class="col6"><label>地址标签 / AML API Key</label><input name="label_api_key" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥"></div>
-        <div class="col6"><label>钱包画像 API URL</label><input name="profile_api_url" value="%s" placeholder="交易、持仓、NFT、空投与交互索引 API 地址"></div>
+        <div class="col6"><label>钱包画像 API URL</label><input class="settings-long-input" name="profile_api_url" value="%s" placeholder="交易、持仓、NFT、空投与交互索引 API 地址" spellcheck="false"></div>
         <div class="col6"><label>钱包画像 API Key</label><input name="profile_api_key" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥"></div>
         <div class="col12"><button>保存 Web3 风控配置</button></div></div></form></div>""" % (
             session["csrf"], esc(web3_cfg["evm_rpc_url"]), esc(web3_cfg["solana_rpc_url"]),
@@ -2513,9 +2901,9 @@ class App(BaseHTTPRequestHandler):
             esc(web3_cfg["goplus_base_url"]), esc(web3_cfg["label_api_url"]), esc(web3_cfg["profile_api_url"]),
         )
         ip_cfg = load_ip_risk_config()
-        ip_card = """<div class="card"><h2>IP 归属地与纯净度检测 API</h2><p>推荐 <strong>IPQualityScore</strong>：可返回国家/地区/城市、ISP、ASN、代理、VPN、Tor、数据中心与欺诈分。每次 IP 入库前会调用已启用的数据源，并保存来源和检测时间。</p><p class="muted">接口 URL 支持 <code>{ip}</code> 和 <code>{key}</code> 占位符；如果没有 <code>{key}</code>，系统会在请求参数中添加 <code>key</code>。密钥仅保存于 <code>local_data/ip_risk.json</code>（权限 600），不回显、不记录到日志。</p><p class="hint">使用 <code>ipwho.is</code> 可免费查询归属地、ISP、ASN 与 VPN/代理等基础属性，但它不提供欺诈分，因此页面会显示“数据源未提供评分”；要得到 0-100 的纯净度，请配置 IPQualityScore 或其他包含欺诈评分的数据源。</p><form method="post" action="/settings/ip-risk"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col3"><label>启用检测</label><select name="enabled"><option value="0"%s>未启用</option><option value="1"%s>启用</option></select></div><div class="col3"><label>供应商名称</label><input name="provider" value="%s" placeholder="IPQualityScore"></div><div class="col6"><label>API URL</label><input name="api_url" value="%s" placeholder="https://.../{key}/{ip}"></div><div class="col12"><label>API Key</label><input name="api_key" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥"><p class="hint">未配置或调用失败时，系统会明确保存为“待检测/数据源异常”，不会伪造归属地或 IP 纯净度。</p></div><div class="col12"><button>保存 IP 风控配置</button></div></div></form></div>""" % (session["csrf"], "" if ip_cfg["enabled"] else " selected", " selected" if ip_cfg["enabled"] else "", esc(ip_cfg["provider"]), esc(ip_cfg["api_url"]))
+        ip_card = """<div class="card"><h2>IP 归属地与纯净度检测 API</h2><p>推荐 <strong>IPQualityScore</strong>：可返回国家/地区/城市、ISP、ASN、代理、VPN、Tor、数据中心与欺诈分。每次 IP 入库前会调用已启用的数据源，并保存来源和检测时间。</p><p class="muted">接口 URL 支持 <code>{ip}</code> 和 <code>{key}</code> 占位符；如果没有 <code>{key}</code>，系统会在请求参数中添加 <code>key</code>。密钥仅保存于 <code>local_data/ip_risk.json</code>（权限 600），不回显、不记录到日志。</p><p class="hint">使用 <code>ipwho.is</code> 可免费查询归属地、ISP、ASN 与 VPN/代理等基础属性，但它不提供欺诈分，因此页面会显示“数据源未提供评分”；要得到 0-100 的纯净度，请配置 IPQualityScore 或其他包含欺诈评分的数据源。</p><form method="post" action="/settings/ip-risk"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col2"><label>启用检测</label><select name="enabled"><option value="0"%s>未启用</option><option value="1"%s>启用</option></select></div><div class="col2"><label>供应商名称</label><input name="provider" value="%s" placeholder="IPQualityScore"></div><div class="col8"><label>API URL</label><input class="settings-long-input" name="api_url" value="%s" placeholder="https://.../{key}/{ip}" spellcheck="false"></div><div class="col12"><label>API Key</label><input name="api_key" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥"><p class="hint">未配置或调用失败时，系统会明确保存为“待检测/数据源异常”，不会伪造归属地或 IP 纯净度。</p></div><div class="col12"><button>保存 IP 风控配置</button></div></div></form></div>""" % (session["csrf"], "" if ip_cfg["enabled"] else " selected", " selected" if ip_cfg["enabled"] else "", esc(ip_cfg["provider"]), esc(ip_cfg["api_url"]))
         system_cfg = load_system_config()
-        payment_card = """<div class="card"><h2>会员收款地址</h2><p>新订单会使用当前配置的 BSC / BEP20 收款地址，并将地址快照写入订单；修改地址不会影响已经生成订单的自动核验。</p><form method="post" action="/settings/payment-receiver"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col9"><label>BEP20 收款地址</label><input name="payment_receiver" value="%s" pattern="0x[a-fA-F0-9]{40}" spellcheck="false" required><p class="hint">仅接受 0x 开头的 42 位 EVM 地址。请确认该地址可接收 BSC 上的 USDT / USDC。</p></div><div class="col3 query-action-row"><button>更新收款地址</button></div></div></form></div>""" % (session["csrf"], esc(system_cfg["payment_receiver"]))
+        payment_card = """<div class="card"><h2>会员收款地址</h2><p>新订单会使用当前配置的 BSC / BEP20 收款地址，并将地址快照写入订单；修改地址不会影响已经生成订单的自动核验。</p><form method="post" action="/settings/payment-receiver"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col10"><label>BEP20 收款地址</label><input class="settings-long-input" name="payment_receiver" value="%s" pattern="0x[a-fA-F0-9]{40}" spellcheck="false" autocomplete="off" required><p class="hint">仅接受 0x 开头的 42 位 EVM 地址。请确认该地址可接收 BSC 上的 USDT / USDC。</p></div><div class="col2 query-action-row"><button>更新收款地址</button></div></div></form></div>""" % (session["csrf"], esc(system_cfg["payment_receiver"]))
         content = flash + """<div class="grid"><div class="card col4"><div class="muted">用户数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">IP 记录数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">操作日志数</div><div class="stat">%s</div></div></div>
         %s%s%s%s%s%s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, payment_card, ip_card, web3_card, smtp_card, announcement_card, cmc_card)
         self.send_html(self.page(session, "系统设置", content, "settings"))
