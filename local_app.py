@@ -289,6 +289,28 @@ def init_db():
           created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_email_announcements_created ON email_announcements(created_at);
+        CREATE TABLE IF NOT EXISTS site_announcements (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sender_user_id INTEGER NOT NULL REFERENCES users(id),
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          popup_enabled INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL DEFAULT 'PUBLISHED' CHECK(status IN ('PUBLISHED','ARCHIVED')),
+          published_at TEXT NOT NULL,
+          expires_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_site_announcements_active ON site_announcements(status,popup_enabled,published_at);
+        CREATE TABLE IF NOT EXISTS site_announcement_receipts (
+          announcement_id INTEGER NOT NULL REFERENCES site_announcements(id),
+          user_id INTEGER NOT NULL REFERENCES users(id),
+          seen_at TEXT,
+          muted_at TEXT,
+          deleted_at TEXT,
+          PRIMARY KEY (announcement_id,user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_site_announcement_receipts_user ON site_announcement_receipts(user_id,announcement_id);
         """)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "recovery_hash" not in columns:
@@ -331,6 +353,9 @@ def init_db():
         ]:
             if column not in ip_columns:
                 conn.execute(ddl)
+        announcement_receipt_columns = {row["name"] for row in conn.execute("PRAGMA table_info(site_announcement_receipts)").fetchall()}
+        if "deleted_at" not in announcement_receipt_columns:
+            conn.execute("ALTER TABLE site_announcement_receipts ADD COLUMN deleted_at TEXT")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
         for legacy, current in LEGACY_EXCHANGES.items():
             conn.execute("UPDATE ip_records SET exchange=? WHERE exchange=?", (current, legacy))
@@ -1194,6 +1219,59 @@ def log_action(conn, user_id, action, target_type, target_id="", detail="", ip_a
     )
 
 
+def active_popup_announcement(conn, user_id):
+    return conn.execute(
+        """SELECT a.* FROM site_announcements a
+           LEFT JOIN site_announcement_receipts r
+             ON r.announcement_id=a.id AND r.user_id=?
+           WHERE a.status='PUBLISHED' AND a.popup_enabled=1
+             AND a.published_at<=?
+             AND (a.expires_at IS NULL OR a.expires_at='' OR a.expires_at>?)
+             AND r.muted_at IS NULL AND r.deleted_at IS NULL
+           ORDER BY a.published_at DESC, a.id DESC LIMIT 1""",
+        (user_id, now(), now()),
+    ).fetchone()
+
+
+def save_announcement_receipt(conn, announcement_id, user_id, action):
+    if action not in ("acknowledge", "mute"):
+        return False
+    announcement = conn.execute(
+        "SELECT id FROM site_announcements WHERE id=? AND status='PUBLISHED'", (announcement_id,)
+    ).fetchone()
+    if not announcement:
+        return False
+    timestamp = now()
+    if action == "mute":
+        conn.execute(
+            """INSERT INTO site_announcement_receipts(announcement_id,user_id,seen_at,muted_at)
+               VALUES(?,?,?,?)
+               ON CONFLICT(announcement_id,user_id) DO UPDATE SET
+                 seen_at=COALESCE(site_announcement_receipts.seen_at,excluded.seen_at), muted_at=excluded.muted_at""",
+            (announcement_id, user_id, timestamp, timestamp),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO site_announcement_receipts(announcement_id,user_id,seen_at)
+               VALUES(?,?,?)
+               ON CONFLICT(announcement_id,user_id) DO UPDATE SET
+                 seen_at=COALESCE(site_announcement_receipts.seen_at,excluded.seen_at)""",
+            (announcement_id, user_id, timestamp),
+        )
+    return True
+
+
+def unread_site_announcement_count(conn, user_id):
+    return conn.execute(
+        """SELECT COUNT(*) FROM site_announcements a
+           LEFT JOIN site_announcement_receipts r
+             ON r.announcement_id=a.id AND r.user_id=?
+           WHERE a.status='PUBLISHED' AND a.published_at<=?
+             AND (r.seen_at IS NULL) AND r.deleted_at IS NULL""",
+        (user_id, now()),
+    ).fetchone()[0]
+
+
 def status_badge(score):
     names = {100: "精确重复", 75: "高度相似", 50: "中度相似", 25: "低度相似", 0: "未发现相似"}
     return '<span class="badge s%s">%s%% · %s</span>' % (score, score, names[score])
@@ -1260,8 +1338,9 @@ table{color:#dbe6f6}th,td{border-bottom:1px solid rgba(255,255,255,.07)}th{color
 body:before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.014) 1px,transparent 1px);background-size:54px 54px;mask-image:radial-gradient(circle at 50% 20%,black,transparent 75%)}::selection{background:rgba(246,214,128,.28);color:white}::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:rgba(255,255,255,.025)}::-webkit-scrollbar-thumb{background:linear-gradient(180deg,rgba(246,214,128,.48),rgba(80,92,117,.42));border:2px solid rgba(5,8,15,.95);border-radius:999px}.side{box-shadow:26px 0 92px rgba(0,0,0,.36),inset -1px 0 rgba(246,214,128,.08)}.brandhead{box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 18px 50px rgba(0,0,0,.20)}.card{overflow:hidden}.card:before{content:"";position:absolute;inset:0;background:linear-gradient(135deg,rgba(255,255,255,.07),transparent 35%),linear-gradient(180deg,rgba(255,255,255,.025),transparent 55%);pointer-events:none}.card>*{position:relative;z-index:1}table{border-collapse:separate;border-spacing:0}th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:850}tr{transition:background .16s ease}tbody tr:hover{background:rgba(246,214,128,.035)}.hero,.member-hero{box-shadow:0 38px 120px rgba(0,0,0,.44),inset 0 1px 0 rgba(255,255,255,.09)}.plan-card{box-shadow:0 28px 90px rgba(0,0,0,.32),inset 0 1px 0 rgba(255,255,255,.08)}.plan-card:hover{transform:translateY(-4px)}.gold-text{background:linear-gradient(135deg,#fff7d6,#f6d680 48%,#b98225);-webkit-background-clip:text;background-clip:text;color:transparent}
 .terminal-font, .stat, .market-price, .risk-score, .metric-value{font-family:"JetBrains Mono","SFMono-Regular","Menlo","HarmonyOS Sans","Source Han Sans SC","PingFang SC",monospace}.logo,.market-kicker,.core-label,.hero-kicker{font-family:"Orbitron","JetBrains Mono","SFMono-Regular","HarmonyOS Sans","PingFang SC",sans-serif}.risk-disclaimer{border:1px solid rgba(246,214,128,.20);border-radius:18px;padding:14px 16px;background:linear-gradient(135deg,rgba(246,214,128,.08),rgba(255,255,255,.025));color:#d8cda9;font-size:13px;line-height:1.75}.trust-grid,.risk-dashboard{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.trust-card,.risk-panel{position:relative;border:1px solid rgba(255,255,255,.09);border-radius:22px;padding:18px;background:linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018));box-shadow:inset 0 1px 0 rgba(255,255,255,.06);overflow:hidden}.trust-card:after,.risk-panel:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 0,rgba(255,255,255,.035) 50%,transparent 100%);background-size:100% 9px;opacity:.28;pointer-events:none}.trust-card strong{display:block;margin-top:8px;font-size:28px;color:#f8fbff}.trust-card span,.risk-panel span{color:#8b9ab0;font-size:12px;font-weight:800}.risk-panel h3{margin:0 0 14px;font-size:17px;color:#f8fbff}.risk-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 0;color:#dce7f7}.risk-score{display:inline-flex;padding:6px 9px;border-radius:999px;font-weight:950}.risk-low{background:rgba(34,197,94,.14);color:#86efac}.risk-medium{background:rgba(246,214,128,.13);color:#f6d680}.risk-high{background:rgba(248,113,113,.14);color:#fecaca}.scan-progress{display:none;margin-top:16px;border:1px solid rgba(246,214,128,.16);border-radius:999px;background:rgba(0,0,0,.24);overflow:hidden}.scan-progress span{display:block;width:0;height:10px;background:linear-gradient(90deg,#f6d680,#34d399);box-shadow:0 0 18px rgba(246,214,128,.35);animation:scan-fill 1.35s ease forwards}@keyframes scan-fill{from{width:0}to{width:85%}}form.scanning .scan-progress{display:block}form.scanning button{pointer-events:none;opacity:.82}.market-detail{position:relative;z-index:1;display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:12px;color:#9badc4;font-size:11px;font-weight:800}.market-detail b{color:#e8f1ff}.market-mini{position:relative;z-index:1;margin-top:12px;width:100%;height:34px}.market-mini path{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.market-tile.up .market-mini path{stroke:#34d399;filter:drop-shadow(0 0 8px rgba(52,211,153,.55))}.market-tile.down .market-mini path{stroke:#fb7185;filter:drop-shadow(0 0 8px rgba(251,113,133,.45))}
 .core-query-card{padding:30px 32px}.core-query-card h2{margin-bottom:30px}.core-query-card .grid,.address-check-card .grid{row-gap:22px}.query-action-row{display:flex;align-items:flex-end;gap:16px;padding-top:4px}.query-action-row button{white-space:nowrap}.address-check-card{margin-top:18px;margin-bottom:26px;border-color:rgba(246,214,128,.18)}.address-check-card h2{margin-bottom:22px}.address-check-card input,.settings-long-input,.pay-address input{min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0}.address-check-card #check-address{font-size:15px}.trust-grid{margin:24px 0 26px}.risk-dashboard{margin:0 0 28px}.payment-panel{margin-top:22px}.plan-order-form{margin-top:20px;display:grid;gap:12px}.plan-order-form select{max-width:180px}.order-box{margin-top:22px;padding:18px;border:1px solid rgba(246,214,128,.16);border-radius:20px;background:rgba(255,255,255,.035)}.verify-form{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:end;margin-top:18px}.verify-form label{grid-column:1/-1}.verify-form input{min-width:0}
+.announcement-modal{position:fixed;z-index:11000;inset:0;display:grid;place-items:center;padding:20px;background:rgba(2,6,14,.78);backdrop-filter:blur(10px)}.announcement-dialog{position:relative;width:min(560px,calc(100vw - 32px));overflow:hidden;border:1px solid rgba(246,214,128,.42);border-radius:26px;padding:30px;background:radial-gradient(circle at 86% 0,rgba(246,214,128,.17),transparent 17rem),linear-gradient(145deg,rgba(19,31,51,.98),rgba(5,11,20,.98));box-shadow:0 34px 110px rgba(0,0,0,.64),inset 0 1px 0 rgba(255,255,255,.11)}.announcement-dialog:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(rgba(255,255,255,.024) 1px,transparent 1px);background-size:100% 7px;opacity:.42}.announcement-dialog>*{position:relative;z-index:1}.announcement-kicker{display:inline-flex;padding:7px 10px;border:1px solid rgba(246,214,128,.24);border-radius:999px;background:rgba(246,214,128,.09);color:#f6d680;font:900 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em}.announcement-dialog h2{margin:17px 0 12px;font-size:25px;line-height:1.35}.announcement-body{max-height:42vh;overflow:auto;padding-right:4px;color:#cbd8e8;font-size:14px;line-height:1.85;white-space:pre-wrap}.announcement-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}.announcement-actions button{min-width:112px}.notice-bell{position:relative;display:inline-grid;place-items:center;width:42px;height:42px;margin-right:10px;border:1px solid rgba(255,255,255,.13);border-radius:14px;background:rgba(255,255,255,.06);color:#f6d680;font-size:21px;line-height:1;box-shadow:none}.notice-bell:hover{background:rgba(246,214,128,.12);transform:translateY(-1px)}.notice-bell-count{position:absolute;right:-7px;top:-7px;display:grid;place-items:center;min-width:20px;height:20px;padding:0 5px;border:2px solid #101a2b;border-radius:999px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;box-shadow:0 0 16px rgba(239,68,68,.48)}.inbox-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.inbox-item{border:1px solid rgba(255,255,255,.10);border-radius:20px;padding:20px;margin-bottom:13px;background:linear-gradient(145deg,rgba(255,255,255,.045),rgba(255,255,255,.018))}.inbox-item.unread{border-color:rgba(246,214,128,.38);box-shadow:inset 3px 0 0 #f6d680}.inbox-title{margin:0;color:#f4f8ff;font-size:18px}.inbox-body{margin:13px 0 0;color:#b6c4d8;line-height:1.8;white-space:pre-wrap}.notice-status{display:inline-flex;padding:5px 9px;border-radius:999px;background:rgba(246,214,128,.12);color:#f6d680;font-size:12px;font-weight:800}.notice-status.read{background:rgba(148,163,184,.12);color:#aab8cb}.inbox-actions{display:flex;justify-content:flex-end;margin-top:16px}.inbox-actions button{padding:8px 12px;font-size:12px}
 @media(max-width:1180px){.market-dashboard{grid-template-columns:1fr}.market-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.market-tile{min-height:168px}}
-@media(max-width:850px){.layout{display:block}.side{position:static;height:auto;overflow:visible;padding:14px}.brandhead{margin-bottom:12px}.brandmark{width:42px;height:42px}.nav{display:flex;overflow:auto}.nav a{white-space:nowrap}.business{margin-top:12px;padding-top:10px}.business-list{display:flex;gap:8px;overflow-x:auto;padding-bottom:3px}.business-item{min-width:max-content;margin:0}.main{padding:16px}.col2,.col3,.col4,.col6,.col7,.col8,.col9,.col10{grid-column:span 12}.query-action-row button{width:100%}.ip-intel-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 14px}.ip-intel-grid .col3{grid-column:span 1}.ip-intel-grid .col12{grid-column:1/-1}.ip-intel-value{min-height:0;font-size:15px}.ip-intel-score{font-size:22px}.card{padding:16px}.hero{min-height:145px;padding:20px}.hero h2{font-size:22px}.market-dashboard{grid-template-columns:1fr}.market-panel{min-height:300px}.market-grid,.trust-grid,.risk-dashboard{grid-template-columns:1fr}.market-price{font-size:34px}.market-chart-price{font-size:28px}}
+@media(max-width:850px){.layout{display:block}.side{position:static;height:auto;overflow:visible;padding:14px}.brandhead{margin-bottom:12px}.brandmark{width:42px;height:42px}.nav{display:flex;overflow:auto}.nav a{white-space:nowrap}.business{margin-top:12px;padding-top:10px}.business-list{display:flex;gap:8px;overflow-x:auto;padding-bottom:3px}.business-item{min-width:max-content;margin:0}.main{padding:16px}.col2,.col3,.col4,.col6,.col7,.col8,.col9,.col10{grid-column:span 12}.query-action-row button{width:100%}.ip-intel-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 14px}.ip-intel-grid .col3{grid-column:span 1}.ip-intel-grid .col12{grid-column:1/-1}.ip-intel-value{min-height:0;font-size:15px}.ip-intel-score{font-size:22px}.card{padding:16px}.hero{min-height:145px;padding:20px}.hero h2{font-size:22px}.market-dashboard{grid-template-columns:1fr}.market-panel{min-height:300px}.market-grid,.trust-grid,.risk-dashboard{grid-template-columns:1fr}.market-price{font-size:34px}.market-chart-price{font-size:28px}.announcement-modal{padding:14px}.announcement-dialog{padding:23px 20px;border-radius:22px}.announcement-dialog h2{font-size:21px}.announcement-actions{display:grid;grid-template-columns:1fr}.announcement-actions button{width:100%}.inbox-meta{align-items:flex-start;flex-direction:column}}
 @media(max-width:850px){.layout{grid-template-columns:1fr}.side{border-right:0}.main{padding:18px}.top h1{font-size:28px}.brandhead{border-radius:18px}.member-hero{grid-template-columns:1fr;min-height:auto}.hero-logo{justify-self:start;width:92px;height:92px}.plan-pro{transform:none}.plan-price{font-size:40px}.hero h2{font-size:30px}}
 """
 
@@ -1401,7 +1480,9 @@ class App(BaseHTTPRequestHandler):
 
     def page(self, session, title, content, active=""):
         user = session["user"]
-        nav = [("/", "IP风险检测", "home"), ("/wallet", "钱包检测专区", "wallet"), ("/markets", "市场监控中心", "markets"), ("/membership", "权限中心", "membership"), ("/history", "查询历史", "history")]
+        with db() as conn:
+            unread_announcements = unread_site_announcement_count(conn, user["id"])
+        nav = [("/", "IP风险检测", "home"), ("/wallet", "钱包检测专区", "wallet"), ("/markets", "市场监控中心", "markets"), ("/membership", "权限中心", "membership"), ("/history", "查询历史", "history"), ("/inbox", "站内信", "inbox")]
         if user["is_owner"]:
             nav += [("/analytics", "会员数据", "analytics"), ("/users", "用户管理", "users"), ("/exchanges", "交易所管理", "exchanges"), ("/logs", "操作日志", "logs"), ("/settings", "系统设置", "settings")]
         links = "".join('<a class="%s" href="%s">%s</a>' % ("on" if active == key else "", url, label) for url, label, key in nav)
@@ -1411,8 +1492,8 @@ class App(BaseHTTPRequestHandler):
         )
         return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s · 原石金手指</title><style>%s</style></head>
         <body><div class="layout"><aside class="side"><div class="brandhead"><img class="brandmark" src="/assets/ck-logo.jpg" alt="CK原石图标"><div class="logo">原石金手指<small>WEB3 风控终端</small></div></div><nav class="nav">%s</nav><section class="business"><div class="business-title">核心业务矩阵</div><div class="business-list">%s</div></section></aside>
-        <main class="main"><div class="top"><div><h1>%s</h1><div class="muted">Gold Finger · Web3 用户增长 / 安全风控 / 女巫检测 / 钱包画像</div></div><div>%s · %s　<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="%s"><button class="secondary">退出</button></form></div></div>%s<div class="contact">产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>　·　<a href="https://t.me/B132609" target="_blank" rel="noopener noreferrer">技术业务交流群</a></div></main></div><script src="/assets/exchange-picker.js?v=20260808-2" defer></script><script src="/assets/market-ticker.js?v=20260801-5" defer></script></body></html>""" % (
-            esc(title), STYLE, links, business, esc(title), esc(user["username"]), user_display_label(user), session["csrf"], content
+        <main class="main"><div class="top"><div><h1>%s</h1><div class="muted">Gold Finger · Web3 用户增长 / 安全风控 / 女巫检测 / 钱包画像</div></div><div><a class="notice-bell" href="/inbox" aria-label="站内信%s">&#128276;%s</a>%s · %s　<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="%s"><button class="secondary">退出</button></form></div></div>%s<div class="contact">产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>　·　<a href="https://t.me/B132609" target="_blank" rel="noopener noreferrer">技术业务交流群</a></div></main></div><script src="/assets/exchange-picker.js?v=20260808-2" defer></script><script src="/assets/market-ticker.js?v=20260801-5" defer></script></body></html>""" % (
+            esc(title), STYLE, links, business, esc(title), "，%s 条未读" % unread_announcements if unread_announcements else "", '<span class="notice-bell-count">%s</span>' % ("99+" if unread_announcements > 99 else unread_announcements) if unread_announcements else "", esc(user["username"]), user_display_label(user), session["csrf"], content
         )
 
     def login_page(self, error=""):
@@ -1474,6 +1555,8 @@ class App(BaseHTTPRequestHandler):
             return self.wallet(query)
         if path == "/history":
             return self.history(query)
+        if path == "/inbox":
+            return self.inbox(query)
         if path == "/markets":
             return self.markets(query)
         if path == "/membership":
@@ -1540,6 +1623,14 @@ class App(BaseHTTPRequestHandler):
             return self.send_smtp_test()
         if path == "/settings/announcement":
             return self.send_announcement()
+        if path == "/announcements/create":
+            return self.create_site_announcement()
+        if path == "/announcements/archive":
+            return self.archive_site_announcement()
+        if path == "/announcements/receipt":
+            return self.site_announcement_receipt()
+        if path == "/announcements/delete":
+            return self.delete_site_announcement_for_user()
         if path == "/exchanges/create":
             return self.create_exchange()
         if path == "/exchanges/update":
@@ -1715,6 +1806,7 @@ class App(BaseHTTPRequestHandler):
                 recent = conn.execute("""SELECT r.*,u.username,u.email FROM ip_records r JOIN users u ON u.id=r.user_id ORDER BY r.last_seen_at DESC LIMIT 10""").fetchall()
             else:
                 recent = conn.execute("""SELECT r.*,u.username,u.email FROM ip_records r JOIN users u ON u.id=r.user_id WHERE r.user_id=? ORDER BY r.last_seen_at DESC LIMIT 10""", (session["user"]["id"],)).fetchall()
+            popup_announcement = active_popup_announcement(conn, session["user"]["id"])
         rows = "".join("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
             esc(display_ip_for_viewer(r["full_ip"], session["user"])), exchange_display(r["exchange"]), status_badge(r["last_similarity"]), user_identity(r, session["user"]), r["query_count"], esc(r["last_seen_at"])
         ) for r in recent) or '<tr><td colspan="6" class="muted">暂无查询记录</td></tr>'
@@ -1732,7 +1824,45 @@ class App(BaseHTTPRequestHandler):
             session["csrf"], exchange_picker(), total_checks, wallet_total, high_risk,
             total_checks, new_today, high_risk, total_checks, rows
         )
+        if popup_announcement:
+            content += """<div class="announcement-modal" id="site-announcement-modal" data-announcement-id="%s">
+            <section class="announcement-dialog" role="dialog" aria-modal="true" aria-labelledby="site-announcement-title">
+            <span class="announcement-kicker">SYSTEM BROADCAST</span><h2 id="site-announcement-title">%s</h2><div class="announcement-body">%s</div>
+            <div class="announcement-actions"><button type="button" class="secondary" data-announcement-action="mute">不再提示</button><button type="button" data-announcement-action="acknowledge">我知道了</button></div></section></div>
+            <script>document.addEventListener("DOMContentLoaded",function(){var modal=document.getElementById("site-announcement-modal");if(!modal)return;var id=modal.getAttribute("data-announcement-id"),key="ys-announcement-seen-"+id;if(sessionStorage.getItem(key)){modal.remove();return;}modal.querySelectorAll("[data-announcement-action]").forEach(function(button){button.addEventListener("click",function(){var action=button.getAttribute("data-announcement-action");button.disabled=true;fetch("/announcements/receipt",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({csrf:%s,id:id,action:action})}).catch(function(){}).finally(function(){sessionStorage.setItem(key,"1");modal.remove();});});});});</script>""" % (
+                popup_announcement["id"], esc(popup_announcement["title"]), esc(popup_announcement["body"]), json.dumps(session["csrf"])
+            )
         self.send_html(self.page(session, "IP风险检测", content, "home"))
+
+    def inbox(self, query):
+        session = self.require_user()
+        if not session:
+            return
+        message = query.get("message", [""])[0]
+        flash = '<div class="flash">%s</div>' % esc(message) if message else ""
+        with db() as conn:
+            announcements = conn.execute(
+                """SELECT a.*,r.seen_at,r.muted_at FROM site_announcements a
+                   LEFT JOIN site_announcement_receipts r ON r.announcement_id=a.id AND r.user_id=?
+                   WHERE a.status='PUBLISHED' AND a.published_at<=?
+                     AND r.deleted_at IS NULL
+                   ORDER BY a.published_at DESC,a.id DESC LIMIT 100""",
+                (session["user"]["id"], now()),
+            ).fetchall()
+            opened_ids = set()
+            for announcement in announcements:
+                if not announcement["seen_at"]:
+                    save_announcement_receipt(conn, announcement["id"], session["user"]["id"], "acknowledge")
+                    opened_ids.add(announcement["id"])
+        rows = "".join(
+            '<article class="inbox-item %s"><div class="inbox-meta"><div><span class="notice-status %s">%s</span><h2 class="inbox-title">%s</h2></div><span class="muted">%s</span></div><div class="inbox-body">%s</div><div class="inbox-actions">%s</div></article>' % (
+                "unread" if not item["seen_at"] and item["id"] not in opened_ids else "", "" if not item["seen_at"] and item["id"] not in opened_ids else "read", "未读" if not item["seen_at"] and item["id"] not in opened_ids else "已读",
+                esc(item["title"]), esc(item["published_at"]), esc(item["body"]),
+                '<form method="post" action="/announcements/delete" onsubmit="return confirm(\'删除后仅会从您的站内信隐藏，确认删除？\');"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="id" value="%s"><button type="submit" class="secondary">删除已读信件</button></form>' % (session["csrf"], item["id"]),
+            ) for item in announcements
+        ) or '<div class="card"><h2>暂无站内公告</h2><p class="muted">系统发布的新公告会在这里保留，重要公告也会在首页提示。</p></div>'
+        content = flash + '<div class="hero"><div><span class="hero-kicker">SYSTEM MESSAGE CENTER</span><h2>站内信</h2><p>这里保留系统发布的公告。已选择“不再提示”的公告仍可在此回看。</p></div></div>' + rows
+        self.send_html(self.page(session, "站内信", content, "inbox"))
 
     def wallet(self, query):
         session = self.require_user()
@@ -2813,6 +2943,12 @@ class App(BaseHTTPRequestHandler):
                 """SELECT a.*,u.username AS sender_username FROM email_announcements a
                    LEFT JOIN users u ON u.id=a.sender_user_id ORDER BY a.created_at DESC LIMIT 8"""
             ).fetchall()
+            site_announcements = conn.execute(
+                """SELECT a.*,COUNT(r.user_id) AS seen_count,
+                          SUM(CASE WHEN r.muted_at IS NOT NULL THEN 1 ELSE 0 END) AS muted_count
+                   FROM site_announcements a LEFT JOIN site_announcement_receipts r ON r.announcement_id=a.id
+                   GROUP BY a.id ORDER BY a.published_at DESC,a.id DESC LIMIT 12"""
+            ).fetchall()
         icon_count = len(load_cmc_icon_map())
         key_ready = os.path.exists(CMC_KEY_FILE) and os.path.getsize(CMC_KEY_FILE) > 15
         if session["user"]["is_owner"]:
@@ -2881,6 +3017,17 @@ class App(BaseHTTPRequestHandler):
         <div class="tablewrap" style="margin-top:18px"><table><thead><tr><th>时间</th><th>主题</th><th>范围</th><th>发送人</th><th>目标 / 成功 / 失败</th></tr></thead><tbody>%s</tbody></table></div></div>""" % (
             session["csrf"], len(announcement_users), recipient_options, "" if smtp_ready and announcement_users else "disabled", announcement_rows,
         )
+        site_announcement_rows = "".join(
+            '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s / %s</td><td>%s</td><td><form method="post" action="/announcements/archive" onsubmit="return confirm(\'确认归档这条站内公告？归档后不再展示，但不删除记录。\');"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="id" value="%s"><button class="secondary" %s>归档</button></form></td></tr>' % (
+                esc(item["published_at"]), esc(item["title"]), "首页弹窗" if item["popup_enabled"] else "仅站内信",
+                esc(item["expires_at"] or "长期有效"), item["seen_count"], item["muted_count"] or 0,
+                "已发布" if item["status"] == "PUBLISHED" else "已归档", session["csrf"], item["id"], "" if item["status"] == "PUBLISHED" else "disabled",
+            ) for item in site_announcements
+        ) or '<tr><td colspan="7" class="muted">暂无站内公告</td></tr>'
+        site_announcement_card = """<div class="card"><h2>站内公告</h2>
+        <p>发布后将面向所有登录用户展示，并同步进入“站内信”。开启首页提示时，用户可选择“我知道了”或“不再提示”；后者仅关闭该条公告的首页弹窗，不会删除站内信记录。</p>
+        <form method="post" action="/announcements/create"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col12"><label>公告标题</label><input name="title" maxlength="160" placeholder="例如：原石金手指 · 系统维护通知" required></div><div class="col12"><label>公告正文</label><textarea name="body" rows="7" maxlength="8000" placeholder="请输入要向全站用户播报的内容" required></textarea><p class="hint">仅支持纯文本，会保留换行。请勿发布密码、API Key、私钥或其他敏感信息。</p></div><div class="col4"><label>首页弹窗</label><select name="popup_enabled"><option value="1">开启首页提示</option><option value="0">仅发送站内信</option></select></div><div class="col4"><label>弹窗截止时间（可选）</label><input name="expires_at" type="datetime-local"></div><div class="col4 query-action-row"><button>发布全站公告</button></div></div></form>
+        <div class="tablewrap" style="margin-top:18px"><table><thead><tr><th>发布时间</th><th>标题</th><th>投递方式</th><th>截止时间</th><th>已读 / 不再提示</th><th>状态</th><th>操作</th></tr></thead><tbody>%s</tbody></table></div></div>""" % (session["csrf"], site_announcement_rows)
         web3_cfg = load_web3_risk_config()
         web3_card = """<div class="card"><h2>第三方 Web3 风控与钱包画像 API</h2>
         <p>推荐地址安全源：<strong>GoPlus Security</strong>。它适合先接入基础地址安全、恶意/钓鱼合约与代币风险信息；RPC 负责真实余额。更完整的 CEX 标签、资金追踪、制裁与 AML 风险可在下方接入商业标签库。</p>
@@ -2905,7 +3052,7 @@ class App(BaseHTTPRequestHandler):
         system_cfg = load_system_config()
         payment_card = """<div class="card"><h2>会员收款地址</h2><p>新订单会使用当前配置的 BSC / BEP20 收款地址，并将地址快照写入订单；修改地址不会影响已经生成订单的自动核验。</p><form method="post" action="/settings/payment-receiver"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col10"><label>BEP20 收款地址</label><input class="settings-long-input" name="payment_receiver" value="%s" pattern="0x[a-fA-F0-9]{40}" spellcheck="false" autocomplete="off" required><p class="hint">仅接受 0x 开头的 42 位 EVM 地址。请确认该地址可接收 BSC 上的 USDT / USDC。</p></div><div class="col2 query-action-row"><button>更新收款地址</button></div></div></form></div>""" % (session["csrf"], esc(system_cfg["payment_receiver"]))
         content = flash + """<div class="grid"><div class="card col4"><div class="muted">用户数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">IP 记录数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">操作日志数</div><div class="stat">%s</div></div></div>
-        %s%s%s%s%s%s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, payment_card, ip_card, web3_card, smtp_card, announcement_card, cmc_card)
+        %s%s%s%s%s%s%s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, payment_card, ip_card, web3_card, smtp_card, announcement_card, site_announcement_card, cmc_card)
         self.send_html(self.page(session, "系统设置", content, "settings"))
 
     def save_web3_risk(self):
@@ -3117,6 +3264,99 @@ class App(BaseHTTPRequestHandler):
                 "范围=%s，目标=%s，成功=%s，失败=%s；正文未记录" % (audience_label, len(recipients), sent_count, failed_count),
             )
         self.redirect("/settings?message=" + urllib.parse.quote("公告发送完成：目标 %s 位，成功 %s 位，失败 %s 位。" % (len(recipients), sent_count, failed_count)))
+
+    def create_site_announcement(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form) or not session["user"]["is_owner"]:
+            return self.send_html("Forbidden", 403)
+        title = form.get("title", "").strip()
+        body = form.get("body", "").strip()
+        popup_enabled = form.get("popup_enabled") == "1"
+        expires_raw = form.get("expires_at", "").strip()
+        if not title or len(title) > 160 or not body or len(body) > 8000:
+            return self.redirect("/settings?message=" + urllib.parse.quote("请填写 1–160 字标题和 1–8000 字公告正文。"))
+        expires_at = None
+        if expires_raw:
+            try:
+                expires_at = datetime.strptime(expires_raw, "%Y-%m-%dT%H:%M").strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return self.redirect("/settings?message=" + urllib.parse.quote("公告截止时间格式不正确。"))
+            if expires_at <= now():
+                return self.redirect("/settings?message=" + urllib.parse.quote("公告截止时间必须晚于当前时间。"))
+        timestamp = now()
+        with db() as conn:
+            announcement_id = conn.execute(
+                """INSERT INTO site_announcements(sender_user_id,title,body,popup_enabled,status,published_at,expires_at,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (session["user"]["id"], title, body, 1 if popup_enabled else 0, "PUBLISHED", timestamp, expires_at, timestamp, timestamp),
+            ).lastrowid
+            log_action(conn, session["user"]["id"], "PUBLISH_SITE_ANNOUNCEMENT", "SITE_ANNOUNCEMENT", announcement_id, detail="标题：%s；首页弹窗：%s" % (title, "开启" if popup_enabled else "关闭"))
+        self.redirect("/settings?message=" + urllib.parse.quote("站内公告已发布，所有登录用户均可在站内信查看。"))
+
+    def archive_site_announcement(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form) or not session["user"]["is_owner"]:
+            return self.send_html("Forbidden", 403)
+        try:
+            announcement_id = int(form.get("id", "0"))
+        except ValueError:
+            announcement_id = 0
+        with db() as conn:
+            announcement = conn.execute("SELECT title,status FROM site_announcements WHERE id=?", (announcement_id,)).fetchone()
+            if not announcement or announcement["status"] != "PUBLISHED":
+                return self.redirect("/settings?message=" + urllib.parse.quote("公告不存在或已归档。"))
+            conn.execute("UPDATE site_announcements SET status='ARCHIVED',updated_at=? WHERE id=?", (now(), announcement_id))
+            log_action(conn, session["user"]["id"], "ARCHIVE_SITE_ANNOUNCEMENT", "SITE_ANNOUNCEMENT", announcement_id, detail="标题：%s" % announcement["title"])
+        self.redirect("/settings?message=" + urllib.parse.quote("站内公告已归档，不会再向用户展示。"))
+
+    def site_announcement_receipt(self):
+        session = self.require_user()
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form):
+            return self.send_json({"error": "请求已失效，请刷新页面重试。"}, 403)
+        try:
+            announcement_id = int(form.get("id", "0"))
+        except ValueError:
+            announcement_id = 0
+        with db() as conn:
+            saved = save_announcement_receipt(conn, announcement_id, session["user"]["id"], form.get("action", ""))
+        if not saved:
+            return self.send_json({"error": "公告不存在或操作无效。"}, 404)
+        self.send_json({"ok": True})
+
+    def delete_site_announcement_for_user(self):
+        session = self.require_user()
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form):
+            return self.send_html(self.page(session, "请求失败", '<div class="flash err">请求已失效，请刷新页面重试。</div>'), 403)
+        try:
+            announcement_id = int(form.get("id", "0"))
+        except ValueError:
+            announcement_id = 0
+        with db() as conn:
+            announcement = conn.execute(
+                """SELECT a.id,r.seen_at,r.deleted_at FROM site_announcements a
+                   LEFT JOIN site_announcement_receipts r ON r.announcement_id=a.id AND r.user_id=?
+                   WHERE a.id=? AND a.status='PUBLISHED'""",
+                (session["user"]["id"], announcement_id),
+            ).fetchone()
+            if not announcement or announcement["deleted_at"] or not announcement["seen_at"]:
+                return self.redirect("/inbox?message=" + urllib.parse.quote("只能删除已经阅读的站内信。"))
+            conn.execute(
+                "UPDATE site_announcement_receipts SET deleted_at=? WHERE announcement_id=? AND user_id=?",
+                (now(), announcement_id, session["user"]["id"]),
+            )
+        self.redirect("/inbox?message=" + urllib.parse.quote("站内信已从您的收件箱删除。"))
 
     def sync_cmc(self):
         session = self.require_user(admin=True)

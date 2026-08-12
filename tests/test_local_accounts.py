@@ -535,6 +535,70 @@ class LocalAccountTests(unittest.TestCase):
         handler.send_announcement()
         self.assertEqual(result["status"], 403)
 
+    def test_owner_can_publish_site_announcement_and_mute_hides_home_popup(self):
+        with APP.db() as conn:
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+            timestamp = APP.now()
+            user_id = conn.execute(
+                "INSERT INTO users(username,email,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                ("noticeuser", "notice@gmail.com", APP.hash_password("NoticePass!123"), "USER", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        handler, result = self.handler({"csrf": "token", "title": "维护通知", "body": "今晚进行维护。", "popup_enabled": "1", "expires_at": ""})
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": owner}, handler)
+        handler.valid_csrf = types.MethodType(lambda self, session, form: True, handler)
+        handler.redirect = types.MethodType(lambda self, location, cookie=None: result.update(redirect=location), handler)
+        handler.create_site_announcement()
+        self.assertIn("站内公告已发布", urllib.parse.unquote(result["redirect"]))
+        with APP.db() as conn:
+            announcement = conn.execute("SELECT * FROM site_announcements").fetchone()
+            self.assertEqual(announcement["title"], "维护通知")
+            self.assertEqual(APP.active_popup_announcement(conn, user["id"])["id"], announcement["id"])
+            self.assertTrue(APP.save_announcement_receipt(conn, announcement["id"], user["id"], "mute"))
+            self.assertIsNone(APP.active_popup_announcement(conn, user["id"]))
+            receipt = conn.execute("SELECT seen_at,muted_at FROM site_announcement_receipts WHERE announcement_id=? AND user_id=?", (announcement["id"], user["id"])).fetchone()
+        self.assertTrue(receipt["seen_at"])
+        self.assertTrue(receipt["muted_at"])
+
+    def test_site_announcement_publish_rejects_backup_admin(self):
+        with APP.db() as conn:
+            timestamp = APP.now()
+            backup_id = conn.execute(
+                "INSERT INTO users(username,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("noticebackup", APP.hash_password("BackupPass!123"), "ADMIN", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            backup = conn.execute("SELECT * FROM users WHERE id=?", (backup_id,)).fetchone()
+        handler, result = self.handler({"csrf": "token", "title": "无权公告", "body": "不能发布。"})
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": backup}, handler)
+        handler.valid_csrf = types.MethodType(lambda self, session, form: True, handler)
+        handler.create_site_announcement()
+        self.assertEqual(result["status"], 403)
+
+    def test_user_can_delete_only_read_site_announcement(self):
+        with APP.db() as conn:
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+            timestamp = APP.now()
+            user_id = conn.execute(
+                "INSERT INTO users(username,email,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                ("deleteinbox", "delete@gmail.com", APP.hash_password("DeletePass!123"), "USER", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            announcement_id = conn.execute(
+                "INSERT INTO site_announcements(sender_user_id,title,body,popup_enabled,status,published_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (owner["id"], "已读公告", "可以删除。", 1, "PUBLISHED", timestamp, timestamp, timestamp),
+            ).lastrowid
+            APP.save_announcement_receipt(conn, announcement_id, user_id, "acknowledge")
+        handler, result = self.handler({"csrf": "token", "id": str(announcement_id)})
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": user}, handler)
+        handler.valid_csrf = types.MethodType(lambda self, session, form: True, handler)
+        handler.redirect = types.MethodType(lambda self, location, cookie=None: result.update(redirect=location), handler)
+        handler.delete_site_announcement_for_user()
+        self.assertIn("已从您的收件箱删除", urllib.parse.unquote(result["redirect"]))
+        with APP.db() as conn:
+            receipt = conn.execute("SELECT deleted_at FROM site_announcement_receipts WHERE announcement_id=? AND user_id=?", (announcement_id, user_id)).fetchone()
+            self.assertTrue(receipt["deleted_at"])
+            self.assertIsNone(APP.active_popup_announcement(conn, user_id))
+
     def delete_as(self, actor, target_id):
         handler, result = self.handler({"csrf": "token", "id": str(target_id)})
         handler.require_user = types.MethodType(
