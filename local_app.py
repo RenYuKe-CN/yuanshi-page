@@ -35,6 +35,7 @@ EXCHANGE_CATALOG_FILE = os.path.join(DATA_DIR, "exchange_catalog.json")
 WEB3_RISK_CONFIG_FILE = os.path.join(DATA_DIR, "web3_risk.json")
 IP_RISK_CONFIG_FILE = os.path.join(DATA_DIR, "ip_risk.json")
 SYSTEM_CONFIG_FILE = os.path.join(DATA_DIR, "system.json")
+BRAND_LOGO_FILE = os.path.join(DATA_DIR, "site_logo.png")
 PAYMENT_RECEIVER = "0x04bCA584834489C26d6474701400c88D954B7782"
 BSC_RPC_URL = os.environ.get("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
 # Wallet risk queries intentionally do not fall back to fabricated demo data. Configure
@@ -67,6 +68,7 @@ BRAND_DIR = os.path.join(BASE_DIR, "public", "brand")
 EXCHANGE_DATA_PATH = os.path.join(BASE_DIR, "data", "exchanges.json")
 ASSETS = {
     "/assets/ck-logo.jpg": (os.path.join(BRAND_DIR, "ck-logo.jpg"), "image/jpeg"),
+    "/assets/site-logo": (BRAND_LOGO_FILE, "image/png"),
     "/assets/crypto-background.jpg": (os.path.join(BRAND_DIR, "crypto-background.jpg"), "image/jpeg"),
     "/assets/exchange-picker.js": (os.path.join(BRAND_DIR, "exchange-picker.js"), "text/javascript; charset=utf-8"),
     "/assets/market-ticker.js": (os.path.join(BRAND_DIR, "market-ticker.js"), "text/javascript; charset=utf-8"),
@@ -495,21 +497,76 @@ def save_ip_risk_config(config):
 
 
 def load_system_config():
-    defaults = {"payment_receiver": PAYMENT_RECEIVER}
+    defaults = {
+        "payment_receiver": PAYMENT_RECEIVER,
+        "site_name": "OriginX",
+        "site_tagline": "WEB3 风控终端",
+        "site_logo": "/assets/site-logo",
+    }
     try:
         with open(SYSTEM_CONFIG_FILE, "r", encoding="utf-8") as file:
             loaded = json.load(file)
-        if isinstance(loaded, dict) and EVM_ADDRESS_RE.fullmatch(str(loaded.get("payment_receiver", ""))):
-            defaults["payment_receiver"] = loaded["payment_receiver"]
+        if isinstance(loaded, dict):
+            if EVM_ADDRESS_RE.fullmatch(str(loaded.get("payment_receiver", ""))):
+                defaults["payment_receiver"] = loaded["payment_receiver"]
+            if isinstance(loaded.get("site_name"), str) and loaded["site_name"].strip():
+                defaults["site_name"] = loaded["site_name"].strip()[:80]
+            if isinstance(loaded.get("site_tagline"), str):
+                defaults["site_tagline"] = loaded["site_tagline"].strip()[:120]
+            if loaded.get("site_logo") == "/assets/site-logo" and os.path.exists(BRAND_LOGO_FILE):
+                defaults["site_logo"] = "/assets/site-logo"
     except (OSError, ValueError):
         pass
     return defaults
 
 
 def save_system_config(config):
+    current = load_system_config()
+    current.update(config)
     with open(SYSTEM_CONFIG_FILE, "w", encoding="utf-8") as file:
-        json.dump(config, file, ensure_ascii=False, indent=2)
+        json.dump(current, file, ensure_ascii=False, indent=2)
     os.chmod(SYSTEM_CONFIG_FILE, 0o600)
+
+
+def site_brand_config():
+    config = load_system_config()
+    return {
+        "name": config.get("site_name") or "OriginX",
+        "tagline": config.get("site_tagline") or "WEB3 风控终端",
+        "logo": config.get("site_logo") or "/assets/ck-logo.jpg",
+    }
+
+
+def save_uploaded_brand_logo(data):
+    """Normalize an owner-uploaded site logo into a private PNG asset."""
+    if not data or len(data) > EXCHANGE_ICON_UPLOAD_MAX_BYTES:
+        raise ValueError("Logo 文件不能为空，且不能超过 4 MB。")
+    try:
+        from PIL import Image, ImageOps
+        source = Image.open(io.BytesIO(data))
+        source.verify()
+        source = Image.open(io.BytesIO(data))
+        if source.format not in ("PNG", "JPEG", "WEBP"):
+            raise ValueError("仅支持 PNG、JPG 或 WebP Logo。")
+        if source.width * source.height > EXCHANGE_ICON_UPLOAD_MAX_PIXELS:
+            raise ValueError("Logo 像素过大，请上传小于 1600 万像素的图片。")
+        source = ImageOps.exif_transpose(source).convert("RGBA")
+        source.thumbnail((192, 192), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+        canvas.alpha_composite(source, ((256 - source.width) // 2, (256 - source.height) // 2))
+        output = io.BytesIO()
+        canvas.save(output, format="PNG", optimize=True)
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("无法读取该图片，请上传有效的 PNG、JPG 或 WebP Logo。")
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    temporary = BRAND_LOGO_FILE + ".tmp"
+    with open(temporary, "wb") as file:
+        file.write(output.getvalue())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, BRAND_LOGO_FILE)
+    return "/assets/site-logo"
 
 
 EXCHANGE_GROUP_META = {
@@ -1429,6 +1486,8 @@ class App(BaseHTTPRequestHandler):
 
     def send_asset(self, path):
         asset_path, content_type = ASSETS[path]
+        if path == "/assets/site-logo" and not os.path.exists(asset_path):
+            asset_path, content_type = ASSETS["/assets/ck-logo.jpg"]
         try:
             with open(asset_path, "rb") as asset:
                 data = asset.read()
@@ -1532,6 +1591,7 @@ class App(BaseHTTPRequestHandler):
 
     def page(self, session, title, content, active=""):
         user = session["user"]
+        brand = site_brand_config()
         with db() as conn:
             unread_announcements = unread_site_announcement_count(conn, user["id"])
         nav = [("/", "IP风险检测", "home"), ("/wallet", "钱包检测专区", "wallet"), ("/markets", "市场监控中心", "markets"), ("/membership", "权限中心", "membership"), ("/history", "查询历史", "history"), ("/inbox", "站内信", "inbox")]
@@ -1542,18 +1602,22 @@ class App(BaseHTTPRequestHandler):
             '<div class="business-item"><span class="business-icon">%s</span><span>%s</span></div>' % (esc(icon), esc(label))
             for icon, label in BUSINESS_ITEMS
         )
-        return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s · 原石金手指</title><style>%s</style></head>
-        <body><div class="layout"><aside class="side"><div class="brandhead"><img class="brandmark" src="/assets/ck-logo.jpg" alt="CK原石图标"><div class="logo">原石金手指<small>WEB3 风控终端</small></div></div><nav class="nav">%s</nav><section class="business"><div class="business-title">核心业务矩阵</div><div class="business-list">%s</div></section></aside>
-        <main class="main"><div class="top"><div><h1>%s</h1><div class="muted">Gold Finger · Web3 用户增长 / 安全风控 / 女巫检测 / 钱包画像</div></div><div><a class="notice-bell" href="/inbox" aria-label="站内信%s">&#128276;%s</a>%s · %s　<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="%s"><button class="secondary">退出</button></form></div></div>%s<div class="contact">产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>　·　<a href="https://t.me/B132609" target="_blank" rel="noopener noreferrer">技术业务交流群</a></div></main></div><script src="/assets/exchange-picker.js?v=20260808-2" defer></script><script src="/assets/market-ticker.js?v=20260801-5" defer></script></body></html>""" % (
-            esc(title), STYLE, links, business, esc(title), "，%s 条未读" % unread_announcements if unread_announcements else "", '<span class="notice-bell-count">%s</span>' % ("99+" if unread_announcements > 99 else unread_announcements) if unread_announcements else "", esc(user["username"]), user_display_label(user), session["csrf"], content
+        # 保留内部业务目录兼容旧测试与后续配置，但不再在网站侧栏展示。
+        business_section = ''
+        return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s · %s</title><style>%s</style></head>
+        <body><div class="layout"><aside class="side"><div class="brandhead"><img class="brandmark" src="%s" alt="%s Logo"><div class="logo">%s<small>%s</small></div></div><nav class="nav">%s</nav>%s</aside>
+        <main class="main"><div class="top"><div><h1>%s</h1><div class="muted">%s · Web3 用户增长 / 安全风控 / 女巫检测 / 钱包画像</div></div><div><a class="notice-bell" href="/inbox" aria-label="站内信%s">&#128276;%s</a>%s · %s　<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="%s"><button class="secondary">退出</button></form></div></div>%s<div class="contact">产品由 %s 提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a></div></main></div><script src="/assets/exchange-picker.js?v=20260808-2" defer></script><script src="/assets/market-ticker.js?v=20260801-5" defer></script></body></html>""" % (
+            esc(title), esc(brand["name"]), STYLE, esc(brand["logo"]), esc(brand["name"]), esc(brand["name"]), esc(brand["tagline"]), links, business_section, esc(title), esc(brand["tagline"]), "，%s 条未读" % unread_announcements if unread_announcements else "", '<span class="notice-bell-count">%s</span>' % ("99+" if unread_announcements > 99 else unread_announcements) if unread_announcements else "", esc(user["username"]), user_display_label(user), session["csrf"], content, esc(brand["name"])
         )
 
     def login_page(self, error=""):
+        brand = site_brand_config()
         flash = '<div class="flash err">%s</div>' % esc(error) if error else ""
-        return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · 原石金手指</title><style>%s</style></head>
-        <body><div class="login"><div class="loginbox"><div class="loginbrand"><img src="/assets/ck-logo.jpg" alt="CK原石图标"><div><h1>欢迎使用 原石金手指</h1><p class="muted">Gold Finger · Web3 风控终端</p></div></div>%s<form method="post" action="/login"><label>用户名 / 邮箱</label><div style="display:grid;grid-template-columns:1fr 145px;gap:8px"><input name="username" autocomplete="username" placeholder="用户名或邮箱账号" required><select name="email_domain"><option value="">用户名登录</option>%s</select></div><label>密码</label><input name="password" type="password" autocomplete="current-password" required><button>登录</button></form><div class="authlinks"><a href="/register">注册普通用户</a><a href="/recover">忘记密码</a></div><div class="contact">产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>　·　<a href="https://t.me/B132609" target="_blank" rel="noopener noreferrer">技术业务交流群</a></div></div></div></body></html>""" % (STYLE, flash, email_suffix_options(""))
+        return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · %s</title><style>%s</style></head>
+        <body><div class="login"><div class="loginbox"><div class="loginbrand"><img src="%s" alt="%s Logo"><div><h1>欢迎使用 %s</h1><p class="muted">%s</p></div></div>%s<form method="post" action="/login"><label>用户名 / 邮箱</label><div style="display:grid;grid-template-columns:1fr 145px;gap:8px"><input name="username" autocomplete="username" placeholder="用户名或邮箱账号" required><select name="email_domain"><option value="">用户名登录</option>%s</select></div><label>密码</label><input name="password" type="password" autocomplete="current-password" required><button>登录</button></form><div class="authlinks"><a href="/register">注册普通用户</a><a href="/recover">忘记密码</a></div><div class="contact">产品由 %s 提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a></div></div></div></body></html>""" % (esc(brand["name"]), STYLE, esc(brand["logo"]), esc(brand["name"]), esc(brand["name"]), esc(brand["tagline"]), flash, email_suffix_options(""), esc(brand["name"]))
 
     def register_page(self, error="", recovery=""):
+        brand = site_brand_config()
         flash = '<div class="flash err">%s</div>' % esc(error) if error else ""
         result = ('<div class="flash">注册成功，请妥善保存下面的恢复码。</div><div class="recovery"><strong>密码恢复码：</strong><br>%s</div><p class="hint">恢复码只显示这一次。请复制保存，不要发给其他人。</p><a class="btn" href="/login">返回登录</a>' % esc(recovery)) if recovery else """%s<form method="post" action="/register" id="register-form"><label>用户名</label><input name="username" minlength="3" maxlength="40" pattern="[A-Za-z0-9_.-]+" autocomplete="username" required><p class="hint">仅支持字母、数字、点、下划线和短横线。</p><label>邮箱</label><div style="display:grid;grid-template-columns:1fr 145px;gap:8px"><input name="email_local" maxlength="180" placeholder="邮箱账号" autocomplete="email" required><select name="email_domain" required>%s</select></div><p class="hint">必须使用指定主流邮箱：Gmail、QQ邮箱、Outlook、163、iCloud、Yahoo、Proton、阿里云邮箱、Zoho Mail。</p><label>邮箱验证码</label><div style="display:grid;grid-template-columns:1fr 120px;gap:8px"><input name="email_code" maxlength="6" pattern="[0-9]{6}" placeholder="6 位验证码" required><button type="button" class="secondary" id="send-code">发送验证码</button></div><p class="hint" id="code-tip">验证码会发送到上方邮箱，10 分钟内有效。</p><label>密码</label><input name="password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required><label>确认密码</label><input name="confirm_password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required><label style="display:flex;gap:8px;align-items:flex-start"><input name="accepted_statement" type="checkbox" value="1" required style="width:auto;margin-top:4px"><span>我已阅读并同意 <a href="/statement" target="_blank">《原石金手指 · 用户注册声明》</a></span></label><button>注册普通用户</button></form><script>
         document.getElementById('send-code')?.addEventListener('click', async function(){
@@ -1568,15 +1632,17 @@ class App(BaseHTTPRequestHandler):
           } catch(e) { tip.textContent = '发送失败，请检查邮箱配置或联系管理员'; tip.style.color = '#fecaca'; }
         });
         </script><div class="authlinks"><a href="/login">返回登录</a><a href="/recover">忘记密码</a></div>""" % (flash, email_suffix_options("@gmail.com"))
-        return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>注册 · 原石金手指</title><style>%s</style></head><body><div class="login"><div class="loginbox"><div class="loginbrand"><img src="/assets/ck-logo.jpg" alt="CK原石图标"><div><h1>创建账号</h1><p class="muted">注册后即可进入系统，开通会员后使用查重服务</p></div></div>%s<div class="contact">产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>　·　<a href="https://t.me/B132609" target="_blank" rel="noopener noreferrer">技术业务交流群</a></div></div></div></body></html>""" % (STYLE, result)
+        return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>注册 · %s</title><style>%s</style></head><body><div class="login"><div class="loginbox"><div class="loginbrand"><img src="%s" alt="%s Logo"><div><h1>创建账号</h1><p class="muted">注册后即可进入系统，开通会员后使用查重服务</p></div></div>%s<div class="contact">产品由 %s 提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a></div></div></div></body></html>""" % (esc(brand["name"]), STYLE, esc(brand["logo"]), esc(brand["name"]), result, esc(brand["name"]))
 
     def recover_page(self, error="", recovery=""):
+        brand = site_brand_config()
         flash = '<div class="flash err">%s</div>' % esc(error) if error else ""
         result = ('<div class="flash">密码已重置。旧恢复码已失效，请保存新的恢复码。</div><div class="recovery"><strong>新密码恢复码：</strong><br>%s</div><a class="btn" href="/login">使用新密码登录</a>' % esc(recovery)) if recovery else """%s<form method="post" action="/recover"><label>用户名</label><input name="username" autocomplete="username" required><label>密码恢复码</label><input name="recovery_code" autocomplete="off" required><label>新密码</label><input name="password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required><label>确认新密码</label><input name="confirm_password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required><button>重置密码</button></form><div class="authlinks"><a href="/login">返回登录</a><a href="/register">注册账号</a></div>""" % flash
-        return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>找回密码 · 原石金手指</title><style>%s</style></head><body><div class="login"><div class="loginbox"><div class="loginbrand"><img src="/assets/ck-logo.jpg" alt="CK原石图标"><div><h1>找回密码</h1><p class="muted">使用注册时保存的恢复码</p></div></div>%s<div class="contact">恢复码丢失请联系：产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>　·　<a href="https://t.me/B132609" target="_blank" rel="noopener noreferrer">技术业务交流群</a></div></div></div></body></html>""" % (STYLE, result)
+        return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>找回密码 · %s</title><style>%s</style></head><body><div class="login"><div class="loginbox"><div class="loginbrand"><img src="%s" alt="%s Logo"><div><h1>找回密码</h1><p class="muted">使用注册时保存的恢复码</p></div></div>%s<div class="contact">恢复码丢失请联系：产品由 %s 提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a></div></div></div></body></html>""" % (esc(brand["name"]), STYLE, esc(brand["logo"]), esc(brand["name"]), result, esc(brand["name"]))
 
     def statement_page(self):
-        return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>用户注册声明 · 原石金手指</title><style>%s</style></head><body><div class="login"><div class="loginbox"><h1>原石金手指 · 用户注册声明</h1><p class="muted">本系统用于 Web3 风控、IP 环境管理、女巫风险识别、钱包画像与行情辅助展示。注册即代表已阅读、已理解并同意本声明。</p><ol style="line-height:1.8;color:#cbd8e8"><li>系统仅保存完成业务所需的数据。</li><li>禁止用于欺诈、洗钱、市场操纵、非法多账号等违法违规用途。</li><li>用户应遵守相关法律法规及交易平台规则。</li><li>行情、趋势和技术指标仅供信息参考，不构成任何投资或交易建议。</li><li>发现共享账号、破解程序、恶意攻击或非法使用时，开发者有权暂停或终止服务。</li></ol><a class="btn" href="/register">返回注册</a></div></div></body></html>""" % STYLE
+        brand = site_brand_config()
+        return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>用户注册声明 · %s</title><style>%s</style></head><body><div class="login"><div class="loginbox"><h1>%s · 用户注册声明</h1><p class="muted">本系统用于 Web3 风控、IP 环境管理、女巫风险识别、钱包画像与行情辅助展示。注册即代表已阅读、已理解并同意本声明。</p><ol style="line-height:1.8;color:#cbd8e8"><li>系统仅保存完成业务所需的数据。</li><li>禁止用于欺诈、洗钱、市场操纵、非法多账号等违法违规用途。</li><li>用户应遵守相关法律法规及交易平台规则。</li><li>行情、趋势和技术指标仅供信息参考，不构成任何投资或交易建议。</li><li>发现共享账号、破解程序、恶意攻击或非法使用时，开发者有权暂停或终止服务。</li></ol><a class="btn" href="/register">返回注册</a></div></div></body></html>""" % (esc(brand["name"]), STYLE, esc(brand["name"]))
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -1667,6 +1733,8 @@ class App(BaseHTTPRequestHandler):
             return self.save_ip_risk()
         if path == "/settings/payment-receiver":
             return self.save_payment_receiver()
+        if path == "/settings/branding":
+            return self.save_branding()
         if path == "/settings/cmc-sync":
             return self.sync_cmc()
         if path == "/settings/smtp":
@@ -2435,6 +2503,7 @@ class App(BaseHTTPRequestHandler):
         session = self.require_user()
         if not session:
             return
+        brand = site_brand_config()
         message = query.get("message", [""])[0]
         if query.get("success", [""])[0] == "1":
             message = "付款验证成功，会员权益已开通并同步到当前账号。"
@@ -2478,7 +2547,7 @@ class App(BaseHTTPRequestHandler):
             )
         else:
             verify_html = '<div class="order-box muted">请先在上方选择套餐，系统会生成订单并跳转到这里。</div>'
-        content = flash + """<div class="hero member-hero"><div><span class="hero-kicker">YS GOLD FINGER · ACCESS CONTROL</span><h2>权限中心</h2><p class="hint">当前会员：<strong>%s</strong>　到期时间：<strong>%s</strong></p></div><img class="hero-logo" src="/assets/ck-logo.jpg" alt="原石金手指 LOGO"></div>
+        content = flash + """<div class="hero member-hero"><div><span class="hero-kicker">%s · ACCESS CONTROL</span><h2>权限中心</h2><p class="hint">当前会员：<strong>%s</strong>　到期时间：<strong>%s</strong></p></div><img class="hero-logo" src="%s" alt="%s Logo"></div>
         <div class="risk-disclaimer">⚠️ 本系统提供 Web3 风控、IP 环境管理和行情辅助信息。所有行情分析、趋势判断、技术指标仅作为信息参考，不构成任何投资建议、交易建议或投资依据。</div>
         <div class="grid">%s</div>
         <div class="card payment-panel" id="payment"><h2>付款信息</h2><div class="payment-rule"><strong>开通条件：</strong>收款地址必须足额到账订单显示的 USDT / USDC 金额。BEP20 Gas 费由付款方自行额外承担，并由钱包以 BNB 扣除；不能从订单金额中扣除。少转或到账不足，系统无法自动开通会员。</div><div class="grid"><div class="col6"><label>支付币种</label><div class="segments"><span class="chain-pill good">USDT</span><span class="chain-pill good">USDC</span><span class="chain-pill gold">BEP20 / BSC</span></div><p class="hint">请务必使用 BNB Smart Chain（BEP20）。其它网络付款无法自动确认。</p></div>
@@ -2486,7 +2555,7 @@ class App(BaseHTTPRequestHandler):
         %s
         <p>如付款遇到问题，请联系：产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>。</p>
         <p class="muted">系统会自动核对 Token、网络、金额、收款地址和交易 Hash；验证成功后立即开通对应会员权益。</p></div>""" % (
-            esc(current_plan), esc(current_expiry), plan_html, current_payment_receiver(), verify_html
+            esc(brand["name"]), esc(current_plan), esc(current_expiry), esc(brand["logo"]), esc(brand["name"]), plan_html, current_payment_receiver(), verify_html
         )
         self.send_html(self.page(session, "权限中心", content, "membership"))
 
@@ -3103,10 +3172,42 @@ class App(BaseHTTPRequestHandler):
         ip_cfg = load_ip_risk_config()
         ip_card = """<div class="card"><h2>IP 归属地与纯净度检测 API</h2><p>推荐 <strong>IPQualityScore</strong>：可返回国家/地区/城市、ISP、ASN、代理、VPN、Tor、数据中心与欺诈分。每次 IP 入库前会调用已启用的数据源，并保存来源和检测时间。</p><p class="muted">接口 URL 支持 <code>{ip}</code> 和 <code>{key}</code> 占位符；如果没有 <code>{key}</code>，系统会在请求参数中添加 <code>key</code>。密钥仅保存于 <code>local_data/ip_risk.json</code>（权限 600），不回显、不记录到日志。</p><p class="hint">使用 <code>ipwho.is</code> 可免费查询归属地、ISP、ASN 与 VPN/代理等基础属性，但它不提供欺诈分，因此页面会显示“数据源未提供评分”；要得到 0-100 的纯净度，请配置 IPQualityScore 或其他包含欺诈评分的数据源。</p><form method="post" action="/settings/ip-risk"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col2"><label>启用检测</label><select name="enabled"><option value="0"%s>未启用</option><option value="1"%s>启用</option></select></div><div class="col2"><label>供应商名称</label><input name="provider" value="%s" placeholder="IPQualityScore"></div><div class="col8"><label>API URL</label><input class="settings-long-input" name="api_url" value="%s" placeholder="https://.../{key}/{ip}" spellcheck="false"></div><div class="col12"><label>API Key</label><input name="api_key" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥"><p class="hint">未配置或调用失败时，系统会明确保存为“待检测/数据源异常”，不会伪造归属地或 IP 纯净度。</p></div><div class="col12"><button>保存 IP 风控配置</button></div></div></form></div>""" % (session["csrf"], "" if ip_cfg["enabled"] else " selected", " selected" if ip_cfg["enabled"] else "", esc(ip_cfg["provider"]), esc(ip_cfg["api_url"]))
         system_cfg = load_system_config()
+        brand = site_brand_config()
+        branding_card = """<div class="card"><h2>网站品牌设置</h2>
+        <p>修改后会同步到侧栏、登录注册页、用户声明和会员页面。Logo 会自动等比适配为 256 × 256 PNG，并保存在服务器 <code>local_data</code>，不会写入 GitHub。</p>
+        <form method="post" action="/settings/branding" enctype="multipart/form-data"><input type="hidden" name="csrf" value="%s"><div class="grid">
+        <div class="col6"><label>网站名称</label><input name="site_name" value="%s" maxlength="80" placeholder="例如 OriginX" required></div>
+        <div class="col6"><label>网站副标题</label><input name="site_tagline" value="%s" maxlength="120" placeholder="例如 WEB3 风控终端"></div>
+        <div class="col8"><label>上传网站 Logo</label><input name="logo_upload" type="file" accept="image/png,image/jpeg,image/webp"><p class="hint">支持 PNG、JPG、WebP，最大 4 MB；系统会自动裁切、居中并保持清晰度。</p></div>
+        <div class="col4"><label>当前 Logo</label><div style="display:flex;align-items:center;gap:12px"><img src="%s" alt="%s Logo" style="width:64px;height:64px;object-fit:contain;border-radius:14px;background:#0b1424;padding:6px"><span class="muted">留空则保留当前 Logo</span></div></div>
+        <div class="col12"><button>保存品牌设置</button></div></div></form></div>""" % (session["csrf"], esc(brand["name"]), esc(brand["tagline"]), esc(brand["logo"]), esc(brand["name"]))
         payment_card = """<div class="card"><h2>会员收款地址</h2><p>新订单会使用当前配置的 BSC / BEP20 收款地址，并将地址快照写入订单；修改地址不会影响已经生成订单的自动核验。</p><form method="post" action="/settings/payment-receiver"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col10"><label>BEP20 收款地址</label><input class="settings-long-input" name="payment_receiver" value="%s" pattern="0x[a-fA-F0-9]{40}" spellcheck="false" autocomplete="off" required><p class="hint">仅接受 0x 开头的 42 位 EVM 地址。请确认该地址可接收 BSC 上的 USDT / USDC。</p></div><div class="col2 query-action-row"><button>更新收款地址</button></div></div></form></div>""" % (session["csrf"], esc(system_cfg["payment_receiver"]))
         content = flash + """<div class="grid"><div class="card col4"><div class="muted">用户数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">IP 记录数</div><div class="stat">%s</div></div><div class="card col4"><div class="muted">操作日志数</div><div class="stat">%s</div></div></div>
-        %s%s%s%s%s%s%s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, payment_card, ip_card, web3_card, smtp_card, announcement_card, site_announcement_card, cmc_card)
+        %s%s%s%s%s%s%s%s<div class="card"><h2>系统运行信息</h2><p>服务端口：<code>3000</code></p><p>数据目录：<code>local_data</code></p><p class="muted">请定期备份数据目录，避免误删或服务器故障造成数据丢失。</p></div>""" % (user_count, record_count, log_count, branding_card, payment_card, ip_card, web3_card, smtp_card, announcement_card, site_announcement_card, cmc_card)
         self.send_html(self.page(session, "系统设置", content, "settings"))
+
+    def save_branding(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form) or not session["user"]["is_owner"]:
+            return self.send_html("Forbidden", 403)
+        name = form.get("site_name", "").strip()
+        tagline = form.get("site_tagline", "").strip()
+        if not name or len(name) > 80 or len(tagline) > 120:
+            return self.redirect("/settings?message=" + urllib.parse.quote("网站名称不能为空且不超过 80 个字符，副标题不超过 120 个字符。"))
+        config = {"site_name": name, "site_tagline": tagline, "site_logo": site_brand_config()["logo"]}
+        upload = form.get("logo_upload")
+        try:
+            if upload and upload.get("data"):
+                config["site_logo"] = save_uploaded_brand_logo(upload["data"])
+        except ValueError as error:
+            return self.redirect("/settings?message=" + urllib.parse.quote(str(error)))
+        save_system_config(config)
+        with db() as conn:
+            log_action(conn, session["user"]["id"], "SAVE_BRANDING_CONFIG", "SYSTEM", detail="网站名称与品牌配置已更新（未记录图片内容）")
+        self.redirect("/settings?message=" + urllib.parse.quote("品牌设置已保存，刷新页面后即可看到新名称和 Logo。"))
 
     def save_web3_risk(self):
         session = self.require_user(admin=True)
