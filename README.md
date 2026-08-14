@@ -174,6 +174,23 @@ sudo bash scripts/server/manage.sh install
 sudo bash scripts/server/manage.sh update
 ```
 
+### 图片处理组件（Logo / 交易所图标上传）
+
+后台上传网站 Logo 或交易所图标需要 Pillow 图片处理组件。新版
+`manage.sh install` 和 `manage.sh update` 会自动安装该组件。
+
+已部署旧版本的服务器可执行以下命令补装，然后重启服务：
+
+```bash
+cd /opt/yuanshi-jinshouzhi
+sudo apt update
+sudo apt install -y python3-pil
+python3 -c "from PIL import Image; print(Image.__version__)"
+sudo bash scripts/server/manage.sh restart
+```
+
+如果验证命令输出 Pillow 版本号，说明图片上传依赖已安装完成。
+
 ### 启动
 
 ```bash

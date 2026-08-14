@@ -530,10 +530,15 @@ def save_system_config(config):
 
 def site_brand_config():
     config = load_system_config()
+    has_uploaded_logo = config.get("site_logo") == "/assets/site-logo" and os.path.exists(BRAND_LOGO_FILE)
+    if has_uploaded_logo:
+        logo = "/assets/site-logo?v=%s" % int(os.path.getmtime(BRAND_LOGO_FILE))
+    else:
+        logo = "/assets/ck-logo.jpg"
     return {
         "name": config.get("site_name") or "OriginX",
         "tagline": config.get("site_tagline") or "WEB3 风控终端",
-        "logo": config.get("site_logo") or "/assets/ck-logo.jpg",
+        "logo": logo,
     }
 
 
@@ -1499,7 +1504,7 @@ class App(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Cache-Control", "no-store" if path == "/assets/site-logo" else "public, max-age=86400")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)

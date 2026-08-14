@@ -16,7 +16,7 @@ need_root() {
 
 install_deps() {
   apt-get update
-  apt-get install -y python3 rsync curl
+  apt-get install -y python3 python3-pil rsync curl
 }
 
 ensure_user() {
