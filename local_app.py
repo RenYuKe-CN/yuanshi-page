@@ -532,7 +532,8 @@ def site_brand_config():
     config = load_system_config()
     has_uploaded_logo = config.get("site_logo") == "/assets/site-logo" and os.path.exists(BRAND_LOGO_FILE)
     if has_uploaded_logo:
-        logo = "/assets/site-logo?v=%s" % int(os.path.getmtime(BRAND_LOGO_FILE))
+        # The URL changes only after an upload, so browsers can cache it indefinitely.
+        logo = "/assets/site-logo?v=%s" % os.stat(BRAND_LOGO_FILE).st_mtime_ns
     else:
         logo = "/assets/ck-logo.jpg"
     return {
@@ -559,11 +560,14 @@ def save_uploaded_brand_logo(data):
             raise ValueError("Logo 像素过大，请上传小于 1600 万像素的图片。")
         source = ImageOps.exif_transpose(source).convert("RGBA")
         source.load()
-        source.thumbnail((192, 192), Image.Resampling.LANCZOS)
-        canvas = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
-        canvas.alpha_composite(source, ((256 - source.width) // 2, (256 - source.height) // 2))
+        # Uploads frequently include transparent export margins. Trim them so the
+        # responsive rounded logo frame can preserve the actual brand proportions.
+        alpha_bounds = source.getchannel("A").getbbox()
+        if alpha_bounds:
+            source = source.crop(alpha_bounds)
+        source.thumbnail((512, 512), Image.Resampling.LANCZOS)
         output = io.BytesIO()
-        canvas.save(output, format="PNG", optimize=True)
+        source.save(output, format="PNG", optimize=True)
     except ValueError:
         raise
     except Exception:
@@ -1457,7 +1461,7 @@ button,.btn{min-height:40px;padding:9px 18px;border-radius:10px;background:var(-
 table{border-collapse:separate;border-spacing:0}th,td{padding:12px 10px;border-bottom-color:var(--line)}th{color:var(--muted);font-size:11px;font-weight:500;letter-spacing:.08em}tbody tr:hover{background:rgba(91,107,255,.055)}.pager a,.pager .on{border-color:var(--line);border-radius:8px;background:#14151c;color:var(--muted)}.pager a:hover,.pager .on{border-color:rgba(91,107,255,.65);background:rgba(91,107,255,.13);color:#ccd1ff}
 .plan-card{min-height:0;padding:24px;border-color:var(--line);border-radius:16px;background:#14151c;box-shadow:none}.plan-card:before{display:none}.plan-card:hover{transform:none;border-color:var(--line-strong)}.plan-card h2{font-size:22px}.plan-badge{border:0;background:rgba(91,107,255,.13);color:#b8c0ff}.plan-price{font:600 40px/1 "JetBrains Mono",ui-monospace,monospace;color:#f2f4f8;text-shadow:none}.plan-unit{color:var(--muted)}.plan-card ul{color:var(--muted)}.plan-starship{border-color:rgba(91,107,255,.44);box-shadow:0 0 0 1px rgba(91,107,255,.1) inset}.plan-pro{transform:none;border-color:rgba(61,215,229,.45);background:linear-gradient(145deg,#19212a,#14151c);box-shadow:0 0 0 1px rgba(61,215,229,.1) inset}.plan-pro:after{right:18px;top:18px;background:rgba(61,215,229,.14);color:#9af2fa;font-weight:600}.plan-pro .plan-price{background:none;color:#f2f4f8}.payment-panel{background:#14151c}.payment-panel:before{display:none}.payment-rule{border-color:rgba(245,213,71,.3);border-radius:10px;background:rgba(245,213,71,.065);color:#e9d98b}.payment-rule strong{color:#f5d547}.chain-pill{border-radius:999px;border-color:var(--line-strong);background:#1e2029}.chain-pill.good{border-color:rgba(43,224,140,.3);background:rgba(43,224,140,.1);color:#8cf0bc}.chain-pill.gold{border-color:rgba(245,213,71,.3);background:rgba(245,213,71,.09);color:#f7df7d}.order-box{border-color:var(--line);border-radius:12px;background:#1e2029}
 .announcement-modal{background:rgba(5,6,9,.78);backdrop-filter:blur(8px)}.announcement-dialog{border-color:var(--line-strong);border-radius:16px;background:#1e2029;box-shadow:0 24px 60px rgba(0,0,0,.55)}.announcement-dialog:before{display:none}.announcement-kicker{border:0;background:rgba(91,107,255,.14);color:#bcc3ff}.notice-status{background:rgba(91,107,255,.13);color:#bec5ff}.inbox-item{border-radius:12px;background:#14151c}.inbox-item.unread{border-color:rgba(91,107,255,.55);box-shadow:inset 3px 0 0 var(--brand)}
-.login{background:linear-gradient(120deg,rgba(10,11,15,.88),rgba(10,11,15,.7)),url('/assets/crypto-background.jpg') center/cover fixed}.loginbox{border-color:var(--line);border-radius:16px;background:rgba(20,21,28,.94);box-shadow:0 24px 60px rgba(0,0,0,.55)}.loginbrand img{border-color:var(--line-strong);border-radius:10px}.loginbox .muted,.loginbox .contact{color:var(--muted)}.loginbox button{background:var(--brand)}.loginbox .contact a,.authlinks a,.contact a{color:#b8c0ff}
+.brandmark,.loginbrand img,.hero-logo{display:block;object-fit:contain;object-position:center;background:#1e2029;border:1px solid var(--line-strong);box-shadow:inset 0 0 0 1px rgba(255,255,255,.025),0 5px 16px rgba(0,0,0,.26)}.brandmark{padding:5px;border-radius:10px;clip-path:none}.login{background:linear-gradient(120deg,rgba(10,11,15,.88),rgba(10,11,15,.7)),url('/assets/crypto-background.jpg') center/cover fixed}.loginbox{border-color:var(--line);border-radius:16px;background:rgba(20,21,28,.94);box-shadow:0 24px 60px rgba(0,0,0,.55)}.loginbrand img{padding:8px;border-radius:14px}.hero-logo{padding:18px;border-radius:18px;clip-path:none;filter:none}.loginbox .muted,.loginbox .contact{color:var(--muted)}.loginbox button{background:var(--brand)}.loginbox .contact a,.authlinks a,.contact a{color:#b8c0ff}
 @media(max-width:850px){.layout{display:block}.side{padding:14px;border-right:0;border-bottom:1px solid var(--line)}.brandhead{margin-bottom:12px}.main{padding:20px}.top{align-items:flex-start;gap:14px}.top>div:last-child{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end}.hero{min-height:142px}.system-status{position:static;margin-top:10px}.console-heading{display:block}.compact-market .market-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.plan-pro{transform:none}}@media(max-width:560px){.compact-market .market-grid{grid-template-columns:1fr}.card,.market-terminal{padding:16px!important}.hero h2{font-size:23px}}
 """
 
@@ -1504,7 +1508,7 @@ class App(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store" if path == "/assets/site-logo" else "public, max-age=86400")
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable" if path == "/assets/site-logo" else "public, max-age=86400")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
