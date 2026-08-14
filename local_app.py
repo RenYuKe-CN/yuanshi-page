@@ -543,14 +543,17 @@ def save_uploaded_brand_logo(data):
         raise ValueError("Logo 文件不能为空，且不能超过 4 MB。")
     try:
         from PIL import Image, ImageOps
+    except ImportError:
+        raise ValueError("服务器未安装图片处理组件，请联系管理员安装 Pillow 后重试。")
+    try:
         source = Image.open(io.BytesIO(data))
-        source.verify()
-        source = Image.open(io.BytesIO(data))
-        if source.format not in ("PNG", "JPEG", "WEBP"):
+        image_format = (source.format or "").upper()
+        if image_format not in ("PNG", "JPEG", "WEBP"):
             raise ValueError("仅支持 PNG、JPG 或 WebP Logo。")
         if source.width * source.height > EXCHANGE_ICON_UPLOAD_MAX_PIXELS:
             raise ValueError("Logo 像素过大，请上传小于 1600 万像素的图片。")
         source = ImageOps.exif_transpose(source).convert("RGBA")
+        source.load()
         source.thumbnail((192, 192), Image.Resampling.LANCZOS)
         canvas = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
         canvas.alpha_composite(source, ((256 - source.width) // 2, (256 - source.height) // 2))
@@ -559,7 +562,7 @@ def save_uploaded_brand_logo(data):
     except ValueError:
         raise
     except Exception:
-        raise ValueError("无法读取该图片，请上传有效的 PNG、JPG 或 WebP Logo。")
+        raise ValueError("图片内容无法读取，可能是文件损坏、扩展名与真实格式不符，或尚未下载完整。请重新导出为标准 PNG、JPG 或 WebP 后上传。")
     os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
     temporary = BRAND_LOGO_FILE + ".tmp"
     with open(temporary, "wb") as file:
@@ -3200,6 +3203,8 @@ class App(BaseHTTPRequestHandler):
         config = {"site_name": name, "site_tagline": tagline, "site_logo": site_brand_config()["logo"]}
         upload = form.get("logo_upload")
         try:
+            if upload and not isinstance(upload, dict):
+                return self.redirect("/settings?message=" + urllib.parse.quote("Logo 上传字段格式不正确，请重新选择文件后保存。"))
             if upload and upload.get("data"):
                 config["site_logo"] = save_uploaded_brand_logo(upload["data"])
         except ValueError as error:
