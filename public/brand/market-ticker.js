@@ -54,7 +54,7 @@
         var trend = changeValue > 0.35 ? "上涨" : (changeValue < -0.35 ? "下跌" : "震荡");
         var support = Number(item.low24h || (item.price * 0.96));
         var resistance = Number(item.high24h || (item.price * 1.04));
-        if (card) card.className = "market-tile " + (up ? "up" : "down");
+        if (card) card.className = (card.classList.contains("home-market-card") ? "home-market-card " : "market-tile ") + (up ? "up" : "down");
         if (price) price.textContent = money(item.price);
         if (change) change.textContent = percent(changeValue);
         if (meta) meta.textContent = item.venue + " · " + new Date(item.updatedAt).toLocaleTimeString();
