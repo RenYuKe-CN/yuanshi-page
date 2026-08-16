@@ -347,6 +347,10 @@ class LocalAccountTests(unittest.TestCase):
         self.assertEqual(APP.membership_price("PRO", 3), 109.0)
         self.assertEqual(APP.membership_price("PRO", 6), 199.0)
         self.assertEqual(APP.membership_price("PRO", 12), 319.0)
+        self.assertEqual(APP.membership_price("MAX", 1), 128.88)
+        self.assertEqual(APP.membership_price("MAX", 3), 347.98)
+        self.assertEqual(APP.membership_price("MAX", 6), 541.30)
+        self.assertEqual(APP.membership_price("MAX", 12), 1031.04)
         self.assertEqual(APP.membership_monthly_equivalent("STARSHIP", 12), 8.0)
         self.assertEqual(APP.membership_monthly_equivalent("PRO", 12), 26.6)
         with APP.db() as conn:
@@ -355,11 +359,58 @@ class LocalAccountTests(unittest.TestCase):
                 ("perioduser", APP.hash_password("PeriodPass!123"), "USER", 0, "ACTIVE", APP.now(), APP.now()),
             ).lastrowid
             expiry = APP.activate_membership(conn, user_id, "STARSHIP", 3)
-            user = conn.execute("SELECT membership_plan,membership_status,membership_expires_at FROM users WHERE id=?", (user_id,)).fetchone()
+            user = conn.execute("""SELECT membership_plan,membership_status,membership_expires_at,
+                                        ip_query_limit,ip_query_used,device_query_limit,device_query_used,
+                                        wallet_query_limit,wallet_query_used
+                                 FROM users WHERE id=?""", (user_id,)).fetchone()
         self.assertEqual(user["membership_plan"], "STARSHIP")
         self.assertEqual(user["membership_status"], "ACTIVE")
         self.assertEqual(user["membership_expires_at"], expiry)
+        self.assertEqual((user["ip_query_limit"], user["ip_query_used"]), (10, 0))
+        self.assertEqual((user["device_query_limit"], user["device_query_used"]), (10, 0))
+        self.assertEqual((user["wallet_query_limit"], user["wallet_query_used"]), (5, 0))
         self.assertGreater((datetime.strptime(expiry, "%Y-%m-%d %H:%M:%S") - datetime.now()).days, 88)
+
+    def test_query_quotas_are_separate_and_unlimited_roles_bypass_them(self):
+        with APP.db() as conn:
+            timestamp = APP.now()
+            starship_id = conn.execute(
+                "INSERT INTO users(username,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("quota-starship", APP.hash_password("QuotaPass!123"), "USER", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            max_id = conn.execute(
+                "INSERT INTO users(username,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("quota-max", APP.hash_password("MaxPass!12345"), "USER", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            whitelist_id = conn.execute(
+                "INSERT INTO users(username,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("quota-whitelist", APP.hash_password("WhitePass!123"), "ADMIN", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            APP.activate_membership(conn, starship_id, "STARSHIP")
+            APP.activate_membership(conn, max_id, "MAX")
+            starship = conn.execute("SELECT * FROM users WHERE id=?", (starship_id,)).fetchone()
+            max_user = conn.execute("SELECT * FROM users WHERE id=?", (max_id,)).fetchone()
+            whitelist = conn.execute("SELECT * FROM users WHERE id=?", (whitelist_id,)).fetchone()
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+
+            for _ in range(5):
+                self.assertTrue(APP.consume_query_quota(conn, starship, "wallet"))
+            starship = conn.execute("SELECT * FROM users WHERE id=?", (starship_id,)).fetchone()
+            self.assertFalse(APP.can_query_local(starship, "wallet")[0])
+            self.assertTrue(APP.can_query_local(starship, "ip")[0])
+            self.assertEqual(starship["ip_query_used"], 0)
+
+            for _ in range(10):
+                self.assertTrue(APP.consume_query_quota(conn, whitelist, "ip"))
+            whitelist = conn.execute("SELECT * FROM users WHERE id=?", (whitelist_id,)).fetchone()
+            self.assertEqual(APP.user_display_label(whitelist), "授权白名单")
+            self.assertFalse(APP.can_query_local(whitelist, "ip")[0])
+            self.assertTrue(APP.can_query_local(whitelist, "device")[0])
+
+            for _ in range(100):
+                self.assertTrue(APP.consume_query_quota(conn, max_user, "wallet"))
+            self.assertTrue(APP.can_query_local(max_user, "wallet")[0])
+            self.assertTrue(APP.consume_query_quota(conn, owner, "ip"))
 
     def test_analytics_uses_paid_orders_and_active_memberships(self):
         with APP.db() as conn:

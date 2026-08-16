@@ -49,14 +49,20 @@ TOKEN_CONTRACTS = {
     "USDC": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
 }
 PLAN_CONFIG = {
-    "STARSHIP": {"name": "星舰会员", "price": 12.0, "limit": 10, "days": 30},
-    "PRO": {"name": "旗舰 PRO", "price": 39.9, "limit": -1, "days": 30},
+    "STARSHIP": {"name": "星舰会员", "price": 12.0, "limits": {"ip": 10, "device": 10, "wallet": 5}, "days": 30},
+    "PRO": {"name": "旗舰 PRO", "price": 39.9, "limits": {"ip": 60, "device": 60, "wallet": 60}, "days": 30},
+    "MAX": {"name": "旗舰 MAX", "price": 128.88, "limits": {"ip": -1, "device": -1, "wallet": -1}, "days": 30},
+}
+QUERY_QUOTA_FIELDS = {
+    "ip": ("ip_query_limit", "ip_query_used", "IP 查询"),
+    "device": ("device_query_limit", "device_query_used", "设备查询"),
+    "wallet": ("wallet_query_limit", "wallet_query_used", "钱包查询"),
 }
 MEMBERSHIP_PERIODS = {
-    1: {"name": "1 个月", "prices": {"STARSHIP": 12.0, "PRO": 39.9}},
-    3: {"name": "3 个月", "prices": {"STARSHIP": 33.0, "PRO": 109.0}},
-    6: {"name": "6 个月", "prices": {"STARSHIP": 60.0, "PRO": 199.0}},
-    12: {"name": "年会员", "prices": {"STARSHIP": 96.0, "PRO": 319.0}},
+    1: {"name": "1 个月", "prices": {"STARSHIP": 12.0, "PRO": 39.9, "MAX": 128.88}},
+    3: {"name": "3 个月", "prices": {"STARSHIP": 33.0, "PRO": 109.0, "MAX": 347.98}},
+    6: {"name": "6 个月", "prices": {"STARSHIP": 60.0, "PRO": 199.0, "MAX": 541.30}},
+    12: {"name": "年会员", "prices": {"STARSHIP": 96.0, "PRO": 319.0, "MAX": 1031.04}},
 }
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
@@ -328,12 +334,37 @@ def init_db():
             ("membership_status", "ALTER TABLE users ADD COLUMN membership_status TEXT NOT NULL DEFAULT 'FREE'"),
             ("query_limit", "ALTER TABLE users ADD COLUMN query_limit INTEGER NOT NULL DEFAULT 0"),
             ("query_used", "ALTER TABLE users ADD COLUMN query_used INTEGER NOT NULL DEFAULT 0"),
+            ("ip_query_limit", "ALTER TABLE users ADD COLUMN ip_query_limit INTEGER NOT NULL DEFAULT 0"),
+            ("ip_query_used", "ALTER TABLE users ADD COLUMN ip_query_used INTEGER NOT NULL DEFAULT 0"),
+            ("device_query_limit", "ALTER TABLE users ADD COLUMN device_query_limit INTEGER NOT NULL DEFAULT 0"),
+            ("device_query_used", "ALTER TABLE users ADD COLUMN device_query_used INTEGER NOT NULL DEFAULT 0"),
+            ("wallet_query_limit", "ALTER TABLE users ADD COLUMN wallet_query_limit INTEGER NOT NULL DEFAULT 0"),
+            ("wallet_query_used", "ALTER TABLE users ADD COLUMN wallet_query_used INTEGER NOT NULL DEFAULT 0"),
             ("membership_expires_at", "ALTER TABLE users ADD COLUMN membership_expires_at TEXT"),
             ("bound_device_token", "ALTER TABLE users ADD COLUMN bound_device_token TEXT"),
             ("email_verified_at", "ALTER TABLE users ADD COLUMN email_verified_at TEXT"),
         ]:
             if column not in columns:
                 conn.execute(ddl)
+        # Migrate the legacy shared quota to per-query quotas without discarding
+        # already consumed IP checks. New purchases always reset all quotas.
+        conn.execute("""UPDATE users SET ip_query_used=query_used
+                        WHERE ip_query_used=0 AND query_used>0""")
+        for plan_code, config in PLAN_CONFIG.items():
+            limits = config["limits"]
+            conn.execute(
+                """UPDATE users
+                   SET ip_query_limit=?,device_query_limit=?,wallet_query_limit=?,query_limit=?
+                   WHERE membership_plan=? AND membership_status='ACTIVE'""",
+                (limits["ip"], limits["device"], limits["wallet"], limits["ip"], plan_code),
+            )
+        whitelist_limits = PLAN_CONFIG["STARSHIP"]["limits"]
+        conn.execute(
+            """UPDATE users
+               SET ip_query_limit=?,device_query_limit=?,wallet_query_limit=?,query_limit=?
+               WHERE role='ADMIN' AND is_owner=0""",
+            (whitelist_limits["ip"], whitelist_limits["device"], whitelist_limits["wallet"], whitelist_limits["ip"]),
+        )
         order_columns = {row["name"] for row in conn.execute("PRAGMA table_info(membership_orders)").fetchall()}
         if "months" not in order_columns:
             conn.execute("ALTER TABLE membership_orders ADD COLUMN months INTEGER NOT NULL DEFAULT 1")
@@ -857,21 +888,73 @@ def user_identity(row, viewer=None):
     return '<div><strong>%s</strong><br><small class="muted">%s</small></div>' % (esc(username), esc(email))
 
 
-def can_query_local(user):
+def quota_limits_for_user(user):
+    if user["is_owner"]:
+        return {kind: -1 for kind in QUERY_QUOTA_FIELDS}
     if user["role"] == "ADMIN":
-        return True, ""
-    status = user["membership_status"] if "membership_status" in user.keys() else "FREE"
+        return PLAN_CONFIG["STARSHIP"]["limits"]
     plan = user["membership_plan"] if "membership_plan" in user.keys() else "FREE"
-    if status != "ACTIVE" or plan == "FREE":
-        return False, "当前功能仅限星舰会员、旗舰 PRO 或管理员使用，请升级权限。"
-    expires_at = user["membership_expires_at"] if "membership_expires_at" in user.keys() else None
-    if expires_at and expires_at < now():
-        return False, "会员已到期，请续费后继续查询。"
-    query_limit = user["query_limit"] if "query_limit" in user.keys() else 0
-    query_used = user["query_used"] if "query_used" in user.keys() else 0
-    if query_limit is not None and int(query_limit) >= 0 and int(query_used) >= int(query_limit):
-        return False, "本月额度已使用完，请升级或续费。"
+    return PLAN_CONFIG.get(plan, {}).get("limits", {})
+
+
+def can_query_local(user, query_kind="ip"):
+    if query_kind not in QUERY_QUOTA_FIELDS:
+        return False, "不支持的查询类型。"
+    if user["is_owner"]:
+        return True, ""
+    if user["role"] != "ADMIN":
+        status = user["membership_status"] if "membership_status" in user.keys() else "FREE"
+        plan = user["membership_plan"] if "membership_plan" in user.keys() else "FREE"
+        if status != "ACTIVE" or plan not in PLAN_CONFIG:
+            return False, "当前功能仅限星舰会员、旗舰 PRO、旗舰 MAX 或授权白名单使用，请升级权限。"
+        expires_at = user["membership_expires_at"] if "membership_expires_at" in user.keys() else None
+        if expires_at and expires_at < now():
+            return False, "会员已到期，请续费后继续查询。"
+    limit_field, used_field, label = QUERY_QUOTA_FIELDS[query_kind]
+    limits = quota_limits_for_user(user)
+    limit = limits.get(query_kind, 0) if user["role"] == "ADMIN" else (user[limit_field] if limit_field in user.keys() else limits.get(query_kind, 0))
+    used = user[used_field] if used_field in user.keys() else 0
+    if limit is not None and int(limit) >= 0 and int(used or 0) >= int(limit):
+        return False, "本月%s额度已使用完，请升级或续费。" % label
     return True, ""
+
+
+def consume_query_quota(conn, user, query_kind, timestamp=None):
+    """Atomically reserve one quota before persisting a successful query record."""
+    if user["is_owner"]:
+        return True
+    limit_field, used_field, _ = QUERY_QUOTA_FIELDS[query_kind]
+    timestamp = timestamp or now()
+    if user["role"] == "ADMIN":
+        limit = PLAN_CONFIG["STARSHIP"]["limits"][query_kind]
+        if query_kind == "ip":
+            result = conn.execute(
+                """UPDATE users SET ip_query_limit=?,ip_query_used=ip_query_used+1,query_limit=?,query_used=query_used+1,updated_at=?
+                   WHERE id=? AND ip_query_used<?""",
+                (limit, limit, timestamp, user["id"], limit),
+            )
+        else:
+            result = conn.execute(
+                "UPDATE users SET %s=?,%s=%s+1,updated_at=? WHERE id=? AND %s<?" % (
+                    limit_field, used_field, used_field, used_field
+                ),
+                (limit, timestamp, user["id"], limit),
+            )
+        return result.rowcount == 1
+    if query_kind == "ip":
+        result = conn.execute(
+            """UPDATE users SET ip_query_used=ip_query_used+1,query_used=query_used+1,updated_at=?
+               WHERE id=? AND (ip_query_limit<0 OR ip_query_used<ip_query_limit)""",
+            (timestamp, user["id"]),
+        )
+    else:
+        result = conn.execute(
+            "UPDATE users SET %s=%s+1,updated_at=? WHERE id=? AND (%s<0 OR %s<%s)" % (
+                used_field, used_field, limit_field, used_field, limit_field
+            ),
+            (timestamp, user["id"]),
+        )
+    return result.rowcount == 1
 
 
 def viewer_can_export_full(user):
@@ -959,7 +1042,7 @@ def user_display_label(user):
     if user["is_owner"]:
         return "总管理员"
     if user["role"] == "ADMIN":
-        return "备用管理员"
+        return "授权白名单"
     plan = user["membership_plan"] if "membership_plan" in user.keys() else "FREE"
     status = user["membership_status"] if "membership_status" in user.keys() else "FREE"
     if status == "ACTIVE" and plan in PLAN_CONFIG:
@@ -1055,9 +1138,13 @@ def activate_membership(conn, user_id, plan, months=1):
         except ValueError:
             pass
     expires_at = (base + timedelta(days=config["days"] * months)).strftime("%Y-%m-%d %H:%M:%S")
+    limits = config["limits"]
     conn.execute(
-        "UPDATE users SET membership_plan=?,membership_status='ACTIVE',query_limit=?,query_used=0,membership_expires_at=?,updated_at=? WHERE id=?",
-        (plan, config["limit"], expires_at, ts, user_id),
+        """UPDATE users SET membership_plan=?,membership_status='ACTIVE',
+           query_limit=?,query_used=0,ip_query_limit=?,ip_query_used=0,
+           device_query_limit=?,device_query_used=0,wallet_query_limit=?,wallet_query_used=0,
+           membership_expires_at=?,updated_at=? WHERE id=?""",
+        (plan, limits["ip"], limits["ip"], limits["device"], limits["wallet"], expires_at, ts, user_id),
     )
     return expires_at
 
@@ -1459,7 +1546,7 @@ button,.btn{min-height:40px;padding:9px 18px;border-radius:10px;background:var(-
 .trust-card,.risk-panel{border-radius:16px;background:#14151c;box-shadow:none}.trust-card:after,.risk-panel:after{display:none}.trust-card:hover,.risk-panel:hover{transform:none;border-color:var(--line-strong)}.trust-card strong{font:600 30px/1 "JetBrains Mono",ui-monospace,monospace}.trust-card span,.risk-panel span{color:var(--muted)}.risk-panel h3{color:var(--text)}.risk-row{color:#d7dbe4}.risk-score{border:0}.risk-low{background:rgba(43,224,140,.12);color:#8cf0bc}.risk-medium{background:rgba(245,213,71,.13);color:#f7df7d}.risk-high{background:rgba(255,58,92,.13);color:#ff9eb0}
 .risk-disclaimer{border-color:rgba(245,213,71,.3);border-radius:10px;background:rgba(245,213,71,.065);color:#d9cf9a;box-shadow:none}.market-terminal{padding:24px!important;border-color:var(--line-strong)!important;background:#14151c!important;box-shadow:0 8px 24px rgba(0,0,0,.45),0 1px 0 rgba(255,255,255,.03) inset}.market-terminal:after{display:none}.market-terminal .market-head{border-bottom-color:var(--line)}.market-kicker,.market-chart-title{color:var(--cyan)}.compact-market .market-grid{grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.compact-market .market-tile{min-height:220px;border-color:var(--line);border-radius:12px;background:#1e2029;box-shadow:none}.compact-market .market-tile:before{display:none}.compact-market .market-tile:hover{transform:translateY(-2px);border-color:#50576a;box-shadow:0 8px 24px rgba(0,0,0,.32)}.compact-market .market-symbol{color:#cfd6e6}.compact-market .market-symbol:before{background:var(--cyan);box-shadow:0 0 10px rgba(61,215,229,.55)}.compact-market .market-price{font:600 24px/1 "JetBrains Mono",ui-monospace,monospace;letter-spacing:-.6px;text-shadow:none}.compact-market .market-detail,.compact-market .market-meta{border-color:var(--line);color:var(--muted)}.compact-market .market-detail b{color:#e7eaf1}.market-tile.up{border-color:rgba(43,224,140,.35)!important}.market-tile.down{border-color:rgba(255,58,92,.38)!important}.market-tile.up .market-change{background:rgba(43,224,140,.12);color:#83f0b6}.market-tile.down .market-change{background:rgba(255,58,92,.12);color:#ff9fb0}.market-source{color:var(--faint)!important}
 table{border-collapse:separate;border-spacing:0}th,td{padding:12px 10px;border-bottom-color:var(--line)}th{color:var(--muted);font-size:11px;font-weight:500;letter-spacing:.08em}tbody tr:hover{background:rgba(91,107,255,.055)}.pager a,.pager .on{border-color:var(--line);border-radius:8px;background:#14151c;color:var(--muted)}.pager a:hover,.pager .on{border-color:rgba(91,107,255,.65);background:rgba(91,107,255,.13);color:#ccd1ff}
-.plan-card{min-height:0;padding:24px;border-color:var(--line);border-radius:16px;background:#14151c;box-shadow:none}.plan-card:before{display:none}.plan-card:hover{transform:none;border-color:var(--line-strong)}.plan-card h2{font-size:22px}.plan-badge{border:0;background:rgba(91,107,255,.13);color:#b8c0ff}.plan-price{font:600 40px/1 "JetBrains Mono",ui-monospace,monospace;color:#f2f4f8;text-shadow:none}.plan-unit{color:var(--muted)}.plan-card ul{color:var(--muted)}.plan-starship{border-color:rgba(91,107,255,.44);box-shadow:0 0 0 1px rgba(91,107,255,.1) inset}.plan-pro{transform:none;border-color:rgba(61,215,229,.45);background:linear-gradient(145deg,#19212a,#14151c);box-shadow:0 0 0 1px rgba(61,215,229,.1) inset}.plan-pro:after{right:18px;top:18px;background:rgba(61,215,229,.14);color:#9af2fa;font-weight:600}.plan-pro .plan-price{background:none;color:#f2f4f8}.payment-panel{background:#14151c}.payment-panel:before{display:none}.payment-rule{border-color:rgba(245,213,71,.3);border-radius:10px;background:rgba(245,213,71,.065);color:#e9d98b}.payment-rule strong{color:#f5d547}.chain-pill{border-radius:999px;border-color:var(--line-strong);background:#1e2029}.chain-pill.good{border-color:rgba(43,224,140,.3);background:rgba(43,224,140,.1);color:#8cf0bc}.chain-pill.gold{border-color:rgba(245,213,71,.3);background:rgba(245,213,71,.09);color:#f7df7d}.order-box{border-color:var(--line);border-radius:12px;background:#1e2029}
+.plan-card{min-height:0;padding:24px;border-color:var(--line);border-radius:16px;background:#14151c;box-shadow:none}.plan-card:before{display:none}.plan-card:hover{transform:none;border-color:var(--line-strong)}.plan-card h2{font-size:22px}.plan-badge{border:0;background:rgba(91,107,255,.13);color:#b8c0ff}.plan-price{font:600 40px/1 "JetBrains Mono",ui-monospace,monospace;color:#f2f4f8;text-shadow:none}.plan-unit{color:var(--muted)}.plan-card ul{color:var(--muted)}.plan-starship{border-color:rgba(91,107,255,.44);box-shadow:0 0 0 1px rgba(91,107,255,.1) inset}.plan-pro{transform:none;border-color:rgba(61,215,229,.45);background:linear-gradient(145deg,#19212a,#14151c);box-shadow:0 0 0 1px rgba(61,215,229,.1) inset}.plan-pro:after{right:18px;top:18px;background:rgba(61,215,229,.14);color:#9af2fa;font-weight:600}.plan-pro .plan-price{background:none;color:#f2f4f8}.plan-max{border-color:rgba(168,85,247,.5);background:linear-gradient(145deg,#241b35,#14151c);box-shadow:0 0 0 1px rgba(168,85,247,.12) inset}.plan-max .plan-badge{background:rgba(168,85,247,.14);color:#e9d5ff}.plan-max .plan-price{color:#f3e8ff}.payment-panel{background:#14151c}.payment-panel:before{display:none}.payment-rule{border-color:rgba(245,213,71,.3);border-radius:10px;background:rgba(245,213,71,.065);color:#e9d98b}.payment-rule strong{color:#f5d547}.chain-pill{border-radius:999px;border-color:var(--line-strong);background:#1e2029}.chain-pill.good{border-color:rgba(43,224,140,.3);background:rgba(43,224,140,.1);color:#8cf0bc}.chain-pill.gold{border-color:rgba(245,213,71,.3);background:rgba(245,213,71,.09);color:#f7df7d}.order-box{border-color:var(--line);border-radius:12px;background:#1e2029}
 .announcement-modal{background:rgba(5,6,9,.78);backdrop-filter:blur(8px)}.announcement-dialog{border-color:var(--line-strong);border-radius:16px;background:#1e2029;box-shadow:0 24px 60px rgba(0,0,0,.55)}.announcement-dialog:before{display:none}.announcement-kicker{border:0;background:rgba(91,107,255,.14);color:#bcc3ff}.notice-status{background:rgba(91,107,255,.13);color:#bec5ff}.inbox-item{border-radius:12px;background:#14151c}.inbox-item.unread{border-color:rgba(91,107,255,.55);box-shadow:inset 3px 0 0 var(--brand)}
 .brandmark,.loginbrand img,.hero-logo{display:block;object-fit:contain;object-position:center;background:#1e2029;border:1px solid var(--line-strong);box-shadow:inset 0 0 0 1px rgba(255,255,255,.025),0 5px 16px rgba(0,0,0,.26)}.brandmark{padding:5px;border-radius:10px;clip-path:none}.login{background:linear-gradient(120deg,rgba(10,11,15,.88),rgba(10,11,15,.7)),url('/assets/crypto-background.jpg') center/cover fixed}.loginbox{border-color:var(--line);border-radius:16px;background:rgba(20,21,28,.94);box-shadow:0 24px 60px rgba(0,0,0,.55)}.loginbrand img{padding:8px;border-radius:14px}.hero-logo{padding:18px;border-radius:18px;clip-path:none;filter:none}.loginbox .muted,.loginbox .contact{color:var(--muted)}.loginbox button{background:var(--brand)}.loginbox .contact a,.authlinks a,.contact a{color:#b8c0ff}
 @media(max-width:850px){.layout{display:block}.side{padding:14px;border-right:0;border-bottom:1px solid var(--line)}.brandhead{margin-bottom:12px}.main{padding:20px}.top{align-items:flex-start;gap:14px}.top>div:last-child{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end}.hero{min-height:142px}.system-status{position:static;margin-top:10px}.console-heading{display:block}.compact-market .market-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.plan-pro{transform:none}}@media(max-width:560px){.compact-market .market-grid{grid-template-columns:1fr}.card,.market-terminal{padding:16px!important}.hero h2{font-size:23px}}
@@ -1628,7 +1715,7 @@ class App(BaseHTTPRequestHandler):
         brand = site_brand_config()
         flash = '<div class="flash err">%s</div>' % esc(error) if error else ""
         return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · %s</title><style>%s</style></head>
-        <body><div class="login"><div class="loginbox"><div class="loginbrand"><img src="%s" alt="%s Logo"><div><h1>欢迎使用 %s</h1><p class="muted">%s</p></div></div>%s<form method="post" action="/login"><label>用户名 / 邮箱</label><div style="display:grid;grid-template-columns:1fr 145px;gap:8px"><input name="username" autocomplete="username" placeholder="用户名或邮箱账号" required><select name="email_domain"><option value="">用户名登录</option>%s</select></div><label>密码</label><input name="password" type="password" autocomplete="current-password" required><button>登录</button></form><div class="authlinks"><a href="/register">注册普通用户</a><a href="/recover">忘记密码</a></div><div class="contact">产品由 %s 提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a></div></div></div></body></html>""" % (esc(brand["name"]), STYLE, esc(brand["logo"]), esc(brand["name"]), esc(brand["name"]), esc(brand["tagline"]), flash, email_suffix_options(""), esc(brand["name"]))
+        <body><div class="login"><div class="loginbox"><div class="loginbrand"><img src="%s" alt="%s Logo"><div><h1>%s</h1><p class="muted">%s</p></div></div>%s<form method="post" action="/login"><label>用户名 / 邮箱</label><div style="display:grid;grid-template-columns:1fr 145px;gap:8px"><input name="username" autocomplete="username" placeholder="用户名或邮箱账号" required><select name="email_domain"><option value="">用户名登录</option>%s</select></div><label>密码</label><input name="password" type="password" autocomplete="current-password" required><button>登录</button></form><div class="authlinks"><a href="/register">注册普通用户</a><a href="/recover">忘记密码</a></div><div class="contact">产品由 %s 提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a></div></div></div></body></html>""" % (esc(brand["name"]), STYLE, esc(brand["logo"]), esc(brand["name"]), esc(brand["name"]), esc(brand["tagline"]), flash, email_suffix_options(""), esc(brand["name"]))
 
     def register_page(self, error="", recovery=""):
         brand = site_brand_config()
@@ -1936,7 +2023,7 @@ class App(BaseHTTPRequestHandler):
             high_risk = conn.execute("SELECT COUNT(*) FROM wallet_checks WHERE risk_score >= 70").fetchone()[0]
             today = now()[:10]
             new_today = conn.execute("SELECT COUNT(*) FROM ip_records WHERE created_at >= ?", (today,)).fetchone()[0] + conn.execute("SELECT COUNT(*) FROM wallet_checks WHERE created_at >= ?", (today,)).fetchone()[0]
-            if session["user"]["is_owner"] or session["user"]["role"] == "ADMIN":
+            if session["user"]["is_owner"]:
                 recent = conn.execute("""SELECT r.*,u.username,u.email FROM ip_records r JOIN users u ON u.id=r.user_id ORDER BY r.last_seen_at DESC LIMIT 10""").fetchall()
             else:
                 recent = conn.execute("""SELECT r.*,u.username,u.email FROM ip_records r JOIN users u ON u.id=r.user_id WHERE r.user_id=? ORDER BY r.last_seen_at DESC LIMIT 10""", (session["user"]["id"],)).fetchall()
@@ -2348,11 +2435,11 @@ class App(BaseHTTPRequestHandler):
         form = self.form()
         if not self.valid_csrf(session, form):
             return self.send_html(self.page(session, "请求失败", '<div class="flash err">请求已失效，请刷新页面重试。</div>'), 403)
-        allowed, reason = can_query_local(session["user"])
+        allowed, reason = can_query_local(session["user"], "ip")
         if not allowed:
             content = """<div class="card"><h2>当前账号尚未开通权限</h2><p class="muted">%s</p><div class="actions"><a class="btn" href="/membership#payment">立即开通</a><a class="btn secondary" href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">联系客服</a></div></div>""" % esc(reason)
             return self.send_html(self.page(session, "需要权限", content, "membership"), 403)
-        if session["user"]["role"] != "ADMIN":
+        if not session["user"]["is_owner"]:
             jar = cookies.SimpleCookie(self.headers.get("Cookie", ""))
             device_cookie = jar.get("ys_device")
             device_token = device_cookie.value if device_cookie else ""
@@ -2391,8 +2478,10 @@ class App(BaseHTTPRequestHandler):
             top = compared[:20]
             exact = [item for item in compared if item[0] == 100]
             highest = top[0][0] if top else 0
-            existing = conn.execute("SELECT id FROM ip_records WHERE full_ip=? AND exchange=?", (raw_ip, exchange)).fetchone()
             ts = now()
+            if not consume_query_quota(conn, session["user"], "ip", ts):
+                return self.send_html(self.page(session, "额度已用完", '<div class="card"><h2>IP 查询额度已使用完</h2><p class="muted">请升级或续费后继续查询。</p><a class="btn" href="/membership#payment">查看套餐</a></div>', "membership"), 403)
+            existing = conn.execute("SELECT id FROM ip_records WHERE full_ip=? AND exchange=?", (raw_ip, exchange)).fetchone()
             if existing:
                 conn.execute("""UPDATE ip_records SET query_count=query_count+1,last_seen_at=?,last_similarity=?,country=?,region=?,city=?,isp=?,asn=?,ip_type=?,purity_score=?,is_proxy=?,is_vpn=?,is_tor=?,is_datacenter=?,ip_source=?,ip_checked_at=?,updated_at=? WHERE id=?""", (ts, highest, ip_risk["country"], ip_risk["region"], ip_risk["city"], ip_risk["isp"], ip_risk["asn"], ip_risk["ip_type"], ip_risk["purity_score"], ip_risk["is_proxy"], ip_risk["is_vpn"], ip_risk["is_tor"], ip_risk["is_datacenter"], ip_risk["source"], ip_risk["checked_at"], ts, existing["id"]))
                 record_id = existing["id"]
@@ -2400,10 +2489,6 @@ class App(BaseHTTPRequestHandler):
                 cur = conn.execute("""INSERT INTO ip_records(full_ip,segment_a,segment_b,segment_c,segment_d,exchange,user_id,query_count,last_similarity,first_seen_at,last_seen_at,created_at,updated_at,country,region,city,isp,asn,ip_type,purity_score,is_proxy,is_vpn,is_tor,is_datacenter,ip_source,ip_checked_at)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (raw_ip, *seg, exchange, session["user"]["id"], 1, highest, ts, ts, ts, ts, ip_risk["country"], ip_risk["region"], ip_risk["city"], ip_risk["isp"], ip_risk["asn"], ip_risk["ip_type"], ip_risk["purity_score"], ip_risk["is_proxy"], ip_risk["is_vpn"], ip_risk["is_tor"], ip_risk["is_datacenter"], ip_risk["source"], ip_risk["checked_at"]))
                 record_id = cur.lastrowid
-            if session["user"]["role"] != "ADMIN":
-                limit_value = session["user"]["query_limit"] if "query_limit" in session["user"].keys() else 0
-                if int(limit_value or 0) >= 0:
-                    conn.execute("UPDATE users SET query_used=query_used+1,updated_at=? WHERE id=?", (ts, session["user"]["id"]))
             log_action(conn, session["user"]["id"], "QUERY_IP", "IP_RECORD", record_id, json.dumps({"ip": raw_ip, "exchange": exchange, "similarity": highest, "ip_source": ip_risk["source"]}, ensure_ascii=False))
         best_matches = top[0][3] if top else [False] * 4
         segments_html = "".join('<span class="seg %s">%s = %s · %s</span>' % (
@@ -2427,7 +2512,7 @@ class App(BaseHTTPRequestHandler):
         form = self.form()
         if not self.valid_csrf(session, form):
             return self.send_html(self.page(session, "请求失败", '<div class="flash err">请求已失效，请刷新页面重试。</div>'), 403)
-        allowed, reason = can_query_local(session["user"])
+        allowed, reason = can_query_local(session["user"], "wallet")
         if not allowed:
             content = """<div class="card"><h2>当前账号尚未开通权限</h2><p class="muted">%s</p><div class="actions"><a class="btn" href="/membership#payment">立即开通</a><a class="btn secondary" href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">联系客服</a></div></div>""" % esc(reason)
             return self.send_html(self.page(session, "需要权限", content, "membership"), 403)
@@ -2441,6 +2526,8 @@ class App(BaseHTTPRequestHandler):
         snapshot = live_wallet_snapshot(address, chain)
         ts = now()
         with db() as conn:
+            if not consume_query_quota(conn, session["user"], "wallet", ts):
+                return self.send_html(self.page(session, "额度已用完", '<div class="card"><h2>钱包查询额度已使用完</h2><p class="muted">请升级或续费后继续查询。</p><a class="btn" href="/membership#payment">查看套餐</a></div>', "membership"), 403)
             cur = conn.execute(
                 "INSERT INTO wallet_checks(address,check_type,user_id,risk_score,result,created_at) VALUES(?,?,?,?,?,?)",
                 (address, check_type, session["user"]["id"], int(snapshot["riskScore"] or 0), json.dumps(snapshot, ensure_ascii=False), ts),
@@ -2528,13 +2615,16 @@ class App(BaseHTTPRequestHandler):
             with db() as conn:
                 order = conn.execute("SELECT * FROM membership_orders WHERE order_no=? AND user_id=?", (order_no, session["user"]["id"])).fetchone()
         with db() as conn:
-            current_user = conn.execute("SELECT role,is_owner,membership_plan,membership_status,membership_expires_at FROM users WHERE id=?", (session["user"]["id"],)).fetchone()
+            current_user = conn.execute("""SELECT role,is_owner,membership_plan,membership_status,membership_expires_at,
+                                               ip_query_limit,ip_query_used,device_query_limit,device_query_used,
+                                               wallet_query_limit,wallet_query_used
+                                        FROM users WHERE id=?""", (session["user"]["id"],)).fetchone()
         current_plan = user_display_label(current_user)
         current_expiry = current_user["membership_expires_at"] or "暂无到期时间"
         plans = [
-            ("plan-free", "", "基础入口", "普通用户", "0", "默认账户", ["可以注册、登录和浏览页面", "不能执行 IP 查询", "需要开通会员后使用查重功能"]),
-            ("plan-starship", "STARSHIP", "热门开通", "星舰会员", "12", "USDT / USDC / 月起", ["全部 CEX 与 DEX", "每月查询额度 10 次", "支持 1、3、6 个月及年会员", "适合小团队环境管理"]),
-            ("plan-pro", "PRO", "旗舰首选", "旗舰 PRO", "39.9", "USDT / USDC / 月起", ["全部交易所", "无限查询与无限历史", "支持 1、3、6 个月及年会员", "优先客服", "适合高频业务团队"]),
+            ("plan-starship", "STARSHIP", "轻度环境管理", "星舰会员", "12", "USDT / USDC / 月", ["IP 查询：10 次 / 月", "设备查询：10 次 / 月", "钱包查询：5 次 / 月", "支持全部 CEX 与 DEX", "适合个人轻度环境管理"]),
+            ("plan-pro", "PRO", "高频环境管理", "旗舰 PRO", "39.9", "USDT / USDC / 月", ["IP 查询：60 次 / 月", "设备查询：60 次 / 月", "钱包查询：60 次 / 月", "市场监控中心", "支持全部 CEX 与 DEX", "适合个人高频环境管理"]),
+            ("plan-max", "MAX", "机构级权限", "旗舰 MAX", "128.88", "USDT / USDC / 月", ["全部 CEX 与 DEX", "钱包检测全部功能", "市场监控中心", "无限次数 + 无限历史", "适合高频量化、机构及专业团队"]),
         ]
         plan_html = "".join(
             """<div class="card col4 plan-card %s"><span class="plan-badge">%s</span><h2>%s</h2><div><span class="plan-price">%s</span><span class="plan-unit"> %s</span></div><ul>%s</ul>%s</div>""" % (
@@ -2561,15 +2651,17 @@ class App(BaseHTTPRequestHandler):
             )
         else:
             verify_html = '<div class="order-box muted">请先在上方选择套餐，系统会生成订单并跳转到这里。</div>'
-        content = flash + """<div class="hero member-hero"><div><span class="hero-kicker">%s · ACCESS CONTROL</span><h2>权限中心</h2><p class="hint">当前会员：<strong>%s</strong>　到期时间：<strong>%s</strong></p></div><img class="hero-logo" src="%s" alt="%s Logo"></div>
+        quota_display = lambda kind: "无限" if current_user[QUERY_QUOTA_FIELDS[kind][0]] < 0 else "%s / %s" % (current_user[QUERY_QUOTA_FIELDS[kind][1]], current_user[QUERY_QUOTA_FIELDS[kind][0]])
+        content = flash + """<div class="hero member-hero"><div><span class="hero-kicker">%s · ACCESS CONTROL</span><h2>权限中心</h2><p class="hint">当前会员：<strong>%s</strong>　到期时间：<strong>%s</strong></p><p class="hint">本周期已用 / 总额度：IP <strong>%s</strong>　设备 <strong>%s</strong>　钱包 <strong>%s</strong></p></div><img class="hero-logo" src="%s" alt="%s Logo"></div>
         <div class="risk-disclaimer">⚠️ 本系统提供 Web3 风控、IP 环境管理和行情辅助信息。所有行情分析、趋势判断、技术指标仅作为信息参考，不构成任何投资建议、交易建议或投资依据。</div>
+        <p class="muted">查询按类别分别计入当前开通周期额度；旗舰 MAX 不限次数与历史。设备额度已预留给后续设备风控检测，不会因正常登录或设备绑定而扣减。</p>
         <div class="grid">%s</div>
         <div class="card payment-panel" id="payment"><h2>付款信息</h2><div class="payment-rule"><strong>开通条件：</strong>收款地址必须足额到账订单显示的 USDT / USDC 金额。BEP20 Gas 费由付款方自行额外承担，并由钱包以 BNB 扣除；不能从订单金额中扣除。少转或到账不足，系统无法自动开通会员。</div><div class="grid"><div class="col6"><label>支付币种</label><div class="segments"><span class="chain-pill good">USDT</span><span class="chain-pill good">USDC</span><span class="chain-pill gold">BEP20 / BSC</span></div><p class="hint">请务必使用 BNB Smart Chain（BEP20）。其它网络付款无法自动确认。</p></div>
         <div class="col6 pay-address"><label>收款地址</label><input readonly value="%s" onclick="this.select()"><p class="hint">点击输入框可全选复制。</p></div></div>
         %s
         <p>如付款遇到问题，请联系：产品由 CK原石提供技术支持 ➡️TG <a href="https://t.me/mommo10338" target="_blank" rel="noopener noreferrer">@mommo10338</a>。</p>
         <p class="muted">系统会自动核对 Token、网络、金额、收款地址和交易 Hash；验证成功后立即开通对应会员权益。</p></div>""" % (
-            esc(brand["name"]), esc(current_plan), esc(current_expiry), esc(brand["logo"]), esc(brand["name"]), plan_html, current_payment_receiver(), verify_html
+            esc(brand["name"]), esc(current_plan), esc(current_expiry), esc(quota_display("ip")), esc(quota_display("device")), esc(quota_display("wallet")), esc(brand["logo"]), esc(brand["name"]), plan_html, current_payment_receiver(), verify_html
         )
         self.send_html(self.page(session, "权限中心", content, "membership"))
 
@@ -2597,7 +2689,7 @@ class App(BaseHTTPRequestHandler):
             page = max(1, int(query.get("page", ["1"])[0]))
         except ValueError:
             page = 1
-        if not session["user"]["is_owner"] and session["user"]["role"] != "ADMIN":
+        if not session["user"]["is_owner"]:
             if where:
                 where += " AND r.user_id = ?"
             else:
@@ -2677,7 +2769,7 @@ class App(BaseHTTPRequestHandler):
         if not session:
             return
         if not session["user"]["is_owner"]:
-            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">备用管理员仅拥有查询使用权，不能删除历史记录。</p></div>'), 403)
+            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">授权白名单拥有与星舰会员相同的查询权限，不能删除历史记录。</p></div>'), 403)
             return
         form = self.form()
         if not self.valid_csrf(session, form):
@@ -2698,7 +2790,7 @@ class App(BaseHTTPRequestHandler):
         if not session:
             return
         if not session["user"]["is_owner"]:
-            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">备用管理员仅拥有查询使用权，不能访问用户管理。</p></div>'), 403)
+            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">授权白名单拥有与星舰会员相同的查询权限，不能访问用户管理。</p></div>'), 403)
             return
         recovery = query.get("recovery", [""])[0]
         created_for = query.get("created_for", [""])[0]
@@ -2717,11 +2809,11 @@ class App(BaseHTTPRequestHandler):
             delete = """ <form class="inline" method="post" action="/users/delete"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="id" value="%s"><button class="danger">删除</button></form>""" % (session["csrf"], u["id"]) if can_delete else ""
             return toggle + delete
         rows = "".join("""<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>""" % (
-            esc(u["username"]), "总管理员" if u["is_owner"] else ("备用管理员" if u["role"] == "ADMIN" else "普通用户"), "启用" if u["status"] == "ACTIVE" else "停用", esc(u["last_login_at"] or "从未"), actions(u)
+            esc(u["username"]), "总管理员" if u["is_owner"] else ("授权白名单" if u["role"] == "ADMIN" else "普通用户"), "启用" if u["status"] == "ACTIVE" else "停用", esc(u["last_login_at"] or "从未"), actions(u)
         ) for u in users)
-        admin_option = '<option value="ADMIN">备用管理员</option>' if session["user"]["is_owner"] else ""
+        admin_option = '<option value="ADMIN">授权白名单</option>' if session["user"]["is_owner"] else ""
         content = """%s%s<div class="card"><h2>创建用户</h2><form method="post" action="/users/create"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col4"><label>用户名</label><input name="username" minlength="3" maxlength="40" pattern="[A-Za-z0-9_.\\-\u4e00-\u9fff]+" placeholder="支持中文、英文和数字" required></div><div class="col4"><label>初始密码</label><input name="password" type="password" minlength="10" maxlength="128" placeholder="至少 10 位" required></div><div class="col4"><label>角色</label><select name="role"><option value="USER">普通用户</option>%s</select></div><div class="col12"><p class="hint">用户名 3–40 位；密码至少 10 位。创建成功后会显示一次性恢复码。</p><button>创建</button></div></div></form></div>
-        <div class="card"><h2>用户列表</h2><p class="muted">公开注册只能成为普通用户；备用管理员仅拥有查询使用权；只有总管理员可以管理账号。删除采用安全软删除，历史记录和操作日志仍会保留。</p><div class="tablewrap"><table><thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead><tbody>%s</tbody></table></div></div>""" % (error_notice, recovery_notice, session["csrf"], admin_option, rows)
+        <div class="card"><h2>用户列表</h2><p class="muted">公开注册只能成为普通用户；授权白名单拥有与星舰会员相同的查询额度和隐私权限；只有总管理员可以管理账号。删除采用安全软删除，历史记录和操作日志仍会保留。</p><div class="tablewrap"><table><thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead><tbody>%s</tbody></table></div></div>""" % (error_notice, recovery_notice, session["csrf"], admin_option, rows)
         self.send_html(self.page(session, "用户管理", content, "users"))
 
     def create_user(self):
@@ -2738,7 +2830,7 @@ class App(BaseHTTPRequestHandler):
         if not USERNAME_RE.fullmatch(username) or len(password) < 10 or len(password) > 128 or role not in ("ADMIN", "USER"):
             return self.redirect("/users?error=" + urllib.parse.quote("用户名需为 3–40 位中文、英文、数字或 . _ -；密码至少 10 位。"))
         if role == "ADMIN" and not session["user"]["is_owner"]:
-            return self.redirect("/users?error=" + urllib.parse.quote("只有总管理员可以创建备用管理员。"))
+            return self.redirect("/users?error=" + urllib.parse.quote("只有总管理员可以创建授权白名单。"))
         recovery_code = secrets.token_urlsafe(18)
         try:
             with db() as conn:
@@ -2842,6 +2934,12 @@ class App(BaseHTTPRequestHandler):
                      AND membership_status='ACTIVE' AND membership_expires_at >= ?""",
                 (now(),),
             ).fetchone()[0]
+            active_max = conn.execute(
+                """SELECT COUNT(*) FROM users
+                   WHERE deleted_at IS NULL AND membership_plan='MAX'
+                     AND membership_status='ACTIVE' AND membership_expires_at >= ?""",
+                (now(),),
+            ).fetchone()[0]
             recent = conn.execute(
                 """SELECT r.full_ip,r.exchange,r.last_similarity,r.last_seen_at,u.username
                    FROM ip_records r JOIN users u ON u.id=r.user_id
@@ -2852,6 +2950,7 @@ class App(BaseHTTPRequestHandler):
             ("收款笔数", str(payment_summary["order_count"]), "按已确认付款订单统计"),
             ("星舰会员", str(active_starship), "当前有效且未到期的星舰会员"),
             ("旗舰 PRO", str(active_pro), "当前有效且未到期的旗舰 PRO 会员"),
+            ("旗舰 MAX", str(active_max), "当前有效且未到期的旗舰 MAX 会员"),
             ("今日调用查询 IP", str(today_queries), "今日成功查询次数"),
             ("累计调用查询 IP", str(total_queries), "按查询日志统计"),
             ("24 小时活跃", str(active_24h), "按最近登录时间统计"),
@@ -2880,7 +2979,7 @@ class App(BaseHTTPRequestHandler):
         if not session:
             return
         if not session["user"]["is_owner"]:
-            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">备用管理员仅拥有查询使用权，不能查看操作日志。</p></div>'), 403)
+            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">授权白名单拥有与星舰会员相同的查询权限，不能查看操作日志。</p></div>'), 403)
             return
         with db() as conn:
             logs = conn.execute("""SELECT l.*,u.username FROM operation_logs l LEFT JOIN users u ON u.id=l.user_id ORDER BY l.created_at DESC LIMIT 500""").fetchall()
@@ -2895,7 +2994,7 @@ class App(BaseHTTPRequestHandler):
         if not session:
             return None
         if not session["user"]["is_owner"]:
-            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">备用管理员只能使用查询，不能维护交易所目录。</p></div>'), 403)
+            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">授权白名单拥有与星舰会员相同的查询权限，不能维护交易所目录。</p></div>'), 403)
             return None
         return session
 
@@ -3064,7 +3163,7 @@ class App(BaseHTTPRequestHandler):
         if not session:
             return
         if not session["user"]["is_owner"]:
-            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">备用管理员仅拥有查询使用权，不能访问系统设置。</p></div>'), 403)
+            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2><p class="muted">授权白名单拥有与星舰会员相同的查询权限，不能访问系统设置。</p></div>'), 403)
             return
         message = query.get("message", [""])[0]
         flash = '<div class="flash">%s</div>' % esc(message) if message else ""
