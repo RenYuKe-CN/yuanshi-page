@@ -412,6 +412,62 @@ class LocalAccountTests(unittest.TestCase):
             self.assertTrue(APP.can_query_local(max_user, "wallet")[0])
             self.assertTrue(APP.consume_query_quota(conn, owner, "ip"))
 
+    def test_owner_can_add_remaining_query_quota_without_resetting_usage(self):
+        with APP.db() as conn:
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+            timestamp = APP.now()
+            user_id = conn.execute(
+                "INSERT INTO users(username,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("quota-topup", APP.hash_password("QuotaTopup!123"), "USER", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            APP.activate_membership(conn, user_id, "STARSHIP")
+            conn.execute(
+                "UPDATE users SET ip_query_used=7,query_used=7,device_query_used=2,wallet_query_used=4 WHERE id=?",
+                (user_id,),
+            )
+
+        handler, result = self.handler({"csrf": "token", "id": str(user_id), "ip_add": "3", "device_add": "5", "wallet_add": "2"})
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": owner}, handler)
+        handler.valid_csrf = types.MethodType(lambda self, session, form: True, handler)
+        handler.redirect = types.MethodType(lambda self, location: result.update(location=location), handler)
+        handler.adjust_user_quota()
+        self.assertEqual(result["location"], "/users")
+        with APP.db() as conn:
+            user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            log = conn.execute("SELECT detail FROM operation_logs WHERE action='ADJUST_QUERY_QUOTA' AND target_id=?", (str(user_id),)).fetchone()
+        self.assertEqual((user["ip_query_limit"], user["device_query_limit"], user["wallet_query_limit"]), (13, 15, 7))
+        self.assertEqual((user["ip_query_used"], user["device_query_used"], user["wallet_query_used"]), (7, 2, 4))
+        self.assertEqual(user["query_limit"], 13)
+        self.assertEqual(APP.remaining_query_quota(user, "ip"), 6)
+        self.assertIn('"wallet": 2', log["detail"])
+
+    def test_unlimited_quota_stays_unlimited_and_non_owner_cannot_adjust(self):
+        with APP.db() as conn:
+            owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()
+            timestamp = APP.now()
+            user_id = conn.execute(
+                "INSERT INTO users(username,password_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("quota-unlimited", APP.hash_password("UnlimitedPass!123"), "USER", 0, "ACTIVE", timestamp, timestamp),
+            ).lastrowid
+            APP.activate_membership(conn, user_id, "MAX")
+            target = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+
+        handler, result = self.handler({"csrf": "token", "id": str(user_id), "ip_add": "4", "device_add": "4", "wallet_add": "4"})
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": owner}, handler)
+        handler.valid_csrf = types.MethodType(lambda self, session, form: True, handler)
+        handler.redirect = types.MethodType(lambda self, location: result.update(location=location), handler)
+        handler.adjust_user_quota()
+        with APP.db() as conn:
+            unchanged = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        self.assertEqual((unchanged["ip_query_limit"], unchanged["device_query_limit"], unchanged["wallet_query_limit"]), (-1, -1, -1))
+        self.assertIsNone(APP.remaining_query_quota(unchanged, "wallet"))
+        self.assertEqual(APP.query_quota_display(unchanged, "wallet"), "不限次数")
+
+        handler, result = self.handler({"csrf": "token", "id": str(user_id), "ip_add": "1", "device_add": "0", "wallet_add": "0"})
+        handler.require_user = types.MethodType(lambda self, admin=False: {"token": "session", "csrf": "token", "user": target}, handler)
+        handler.adjust_user_quota()
+        self.assertEqual(result["status"], 403)
+
     def test_analytics_uses_paid_orders_and_active_memberships(self):
         with APP.db() as conn:
             owner = conn.execute("SELECT * FROM users WHERE is_owner=1").fetchone()

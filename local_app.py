@@ -350,21 +350,8 @@ def init_db():
         # already consumed IP checks. New purchases always reset all quotas.
         conn.execute("""UPDATE users SET ip_query_used=query_used
                         WHERE ip_query_used=0 AND query_used>0""")
-        for plan_code, config in PLAN_CONFIG.items():
-            limits = config["limits"]
-            conn.execute(
-                """UPDATE users
-                   SET ip_query_limit=?,device_query_limit=?,wallet_query_limit=?,query_limit=?
-                   WHERE membership_plan=? AND membership_status='ACTIVE'""",
-                (limits["ip"], limits["device"], limits["wallet"], limits["ip"], plan_code),
-            )
-        whitelist_limits = PLAN_CONFIG["STARSHIP"]["limits"]
-        conn.execute(
-            """UPDATE users
-               SET ip_query_limit=?,device_query_limit=?,wallet_query_limit=?,query_limit=?
-               WHERE role='ADMIN' AND is_owner=0""",
-            (whitelist_limits["ip"], whitelist_limits["device"], whitelist_limits["wallet"], whitelist_limits["ip"]),
-        )
+        # Do not reapply plan defaults at startup. Membership activation is the
+        # only reset point, while administrator top-ups must survive restarts.
         order_columns = {row["name"] for row in conn.execute("PRAGMA table_info(membership_orders)").fetchall()}
         if "months" not in order_columns:
             conn.execute("ALTER TABLE membership_orders ADD COLUMN months INTEGER NOT NULL DEFAULT 1")
@@ -897,6 +884,27 @@ def quota_limits_for_user(user):
     return PLAN_CONFIG.get(plan, {}).get("limits", {})
 
 
+def remaining_query_quota(user, query_kind):
+    """Return remaining checks, or None when the category is unlimited."""
+    if query_kind not in QUERY_QUOTA_FIELDS:
+        raise ValueError("不支持的查询类型")
+    if user["is_owner"]:
+        return None
+    limit_field, used_field, _ = QUERY_QUOTA_FIELDS[query_kind]
+    limit = user[limit_field] if limit_field in user.keys() else quota_limits_for_user(user).get(query_kind, 0)
+    if user["role"] == "ADMIN" and int(limit or 0) == 0:
+        limit = PLAN_CONFIG["STARSHIP"]["limits"][query_kind]
+    if limit is None or int(limit) < 0:
+        return None
+    used = user[used_field] if used_field in user.keys() else 0
+    return max(0, int(limit) - int(used or 0))
+
+
+def query_quota_display(user, query_kind):
+    remaining = remaining_query_quota(user, query_kind)
+    return "不限次数" if remaining is None else "%s 次" % remaining
+
+
 def can_query_local(user, query_kind="ip"):
     if query_kind not in QUERY_QUOTA_FIELDS:
         return False, "不支持的查询类型。"
@@ -912,7 +920,9 @@ def can_query_local(user, query_kind="ip"):
             return False, "会员已到期，请续费后继续查询。"
     limit_field, used_field, label = QUERY_QUOTA_FIELDS[query_kind]
     limits = quota_limits_for_user(user)
-    limit = limits.get(query_kind, 0) if user["role"] == "ADMIN" else (user[limit_field] if limit_field in user.keys() else limits.get(query_kind, 0))
+    limit = user[limit_field] if limit_field in user.keys() else limits.get(query_kind, 0)
+    if user["role"] == "ADMIN" and int(limit or 0) == 0:
+        limit = limits.get(query_kind, 0)
     used = user[used_field] if used_field in user.keys() else 0
     if limit is not None and int(limit) >= 0 and int(used or 0) >= int(limit):
         return False, "本月%s额度已使用完，请升级或续费。" % label
@@ -926,7 +936,8 @@ def consume_query_quota(conn, user, query_kind, timestamp=None):
     limit_field, used_field, _ = QUERY_QUOTA_FIELDS[query_kind]
     timestamp = timestamp or now()
     if user["role"] == "ADMIN":
-        limit = PLAN_CONFIG["STARSHIP"]["limits"][query_kind]
+        stored_limit = user[limit_field] if limit_field in user.keys() else 0
+        limit = int(stored_limit or 0) or PLAN_CONFIG["STARSHIP"]["limits"][query_kind]
         if query_kind == "ip":
             result = conn.execute(
                 """UPDATE users SET ip_query_limit=?,ip_query_used=ip_query_used+1,query_limit=?,query_used=query_used+1,updated_at=?
@@ -1826,6 +1837,8 @@ class App(BaseHTTPRequestHandler):
             return self.toggle_user()
         if path == "/users/delete":
             return self.delete_user()
+        if path == "/users/quota":
+            return self.adjust_user_quota()
         if path == "/settings/cmc-key":
             return self.save_cmc_key()
         if path == "/settings/web3-risk":
@@ -2651,8 +2664,8 @@ class App(BaseHTTPRequestHandler):
             )
         else:
             verify_html = '<div class="order-box muted">请先在上方选择套餐，系统会生成订单并跳转到这里。</div>'
-        quota_display = lambda kind: "无限" if current_user[QUERY_QUOTA_FIELDS[kind][0]] < 0 else "%s / %s" % (current_user[QUERY_QUOTA_FIELDS[kind][1]], current_user[QUERY_QUOTA_FIELDS[kind][0]])
-        content = flash + """<div class="hero member-hero"><div><span class="hero-kicker">%s · ACCESS CONTROL</span><h2>权限中心</h2><p class="hint">当前会员：<strong>%s</strong>　到期时间：<strong>%s</strong></p><p class="hint">本周期已用 / 总额度：IP <strong>%s</strong>　设备 <strong>%s</strong>　钱包 <strong>%s</strong></p></div><img class="hero-logo" src="%s" alt="%s Logo"></div>
+        quota_display = lambda kind: query_quota_display(current_user, kind)
+        content = flash + """<div class="hero member-hero"><div><span class="hero-kicker">%s · ACCESS CONTROL</span><h2>权限中心</h2><p class="hint">当前会员：<strong>%s</strong>　到期时间：<strong>%s</strong></p><p class="hint">剩余查询次数：IP <strong>%s</strong>　设备 <strong>%s</strong>　钱包 <strong>%s</strong></p></div><img class="hero-logo" src="%s" alt="%s Logo"></div>
         <div class="risk-disclaimer">⚠️ 本系统提供 Web3 风控、IP 环境管理和行情辅助信息。所有行情分析、趋势判断、技术指标仅作为信息参考，不构成任何投资建议、交易建议或投资依据。</div>
         <p class="muted">查询按类别分别计入当前开通周期额度；旗舰 MAX 不限次数与历史。设备额度已预留给后续设备风控检测，不会因正常登录或设备绑定而扣减。</p>
         <div class="grid">%s</div>
@@ -2808,12 +2821,17 @@ class App(BaseHTTPRequestHandler):
             can_delete = session["user"]["is_owner"] or u["role"] == "USER"
             delete = """ <form class="inline" method="post" action="/users/delete"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="id" value="%s"><button class="danger">删除</button></form>""" % (session["csrf"], u["id"]) if can_delete else ""
             return toggle + delete
-        rows = "".join("""<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>""" % (
-            esc(u["username"]), "总管理员" if u["is_owner"] else ("授权白名单" if u["role"] == "ADMIN" else "普通用户"), "启用" if u["status"] == "ACTIVE" else "停用", esc(u["last_login_at"] or "从未"), actions(u)
+        quota_summary = lambda u: "<br>".join("%s：%s" % (QUERY_QUOTA_FIELDS[kind][2], query_quota_display(u, kind)) for kind in QUERY_QUOTA_FIELDS)
+        rows = "".join("""<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>""" % (
+            esc(u["username"]), "总管理员" if u["is_owner"] else ("授权白名单" if u["role"] == "ADMIN" else "普通用户"), "启用" if u["status"] == "ACTIVE" else "停用", quota_summary(u), esc(u["last_login_at"] or "从未"), actions(u)
         ) for u in users)
         admin_option = '<option value="ADMIN">授权白名单</option>' if session["user"]["is_owner"] else ""
+        quota_options = "".join('<option value="%s">%s（IP %s，设备 %s，钱包 %s）</option>' % (
+            u["id"], esc(u["username"]), esc(query_quota_display(u, "ip")), esc(query_quota_display(u, "device")), esc(query_quota_display(u, "wallet"))
+        ) for u in users if not u["is_owner"])
+        quota_card = """<div class="card"><h2>增加查询次数</h2><p class="muted">增加的是当前可用次数，不会清除已使用记录；无限套餐保持不限次数，无需追加。每项可填 0 到 1,000,000 次。</p><form method="post" action="/users/quota"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col4"><label>用户</label><select name="id" required><option value="">请选择用户</option>%s</select></div><div class="col2"><label>IP 查询</label><input type="number" name="ip_add" min="0" max="1000000" value="0" required></div><div class="col3"><label>设备查询</label><input type="number" name="device_add" min="0" max="1000000" value="0" required></div><div class="col3"><label>钱包查询</label><input type="number" name="wallet_add" min="0" max="1000000" value="0" required></div><div class="col12"><button>增加查询次数</button></div></div></form></div>""" % (session["csrf"], quota_options)
         content = """%s%s<div class="card"><h2>创建用户</h2><form method="post" action="/users/create"><input type="hidden" name="csrf" value="%s"><div class="grid"><div class="col4"><label>用户名</label><input name="username" minlength="3" maxlength="40" pattern="[A-Za-z0-9_.\\-\u4e00-\u9fff]+" placeholder="支持中文、英文和数字" required></div><div class="col4"><label>初始密码</label><input name="password" type="password" minlength="10" maxlength="128" placeholder="至少 10 位" required></div><div class="col4"><label>角色</label><select name="role"><option value="USER">普通用户</option>%s</select></div><div class="col12"><p class="hint">用户名 3–40 位；密码至少 10 位。创建成功后会显示一次性恢复码。</p><button>创建</button></div></div></form></div>
-        <div class="card"><h2>用户列表</h2><p class="muted">公开注册只能成为普通用户；授权白名单拥有与星舰会员相同的查询额度和隐私权限；只有总管理员可以管理账号。删除采用安全软删除，历史记录和操作日志仍会保留。</p><div class="tablewrap"><table><thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead><tbody>%s</tbody></table></div></div>""" % (error_notice, recovery_notice, session["csrf"], admin_option, rows)
+        %s<div class="card"><h2>用户列表</h2><p class="muted">公开注册只能成为普通用户；授权白名单拥有与星舰会员相同的查询额度和隐私权限；只有总管理员可以管理账号。删除采用安全软删除，历史记录和操作日志仍会保留。</p><div class="tablewrap"><table><thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>剩余查询次数</th><th>最后登录</th><th>操作</th></tr></thead><tbody>%s</tbody></table></div></div>""" % (error_notice, recovery_notice, session["csrf"], admin_option, quota_card, rows)
         self.send_html(self.page(session, "用户管理", content, "users"))
 
     def create_user(self):
@@ -2835,7 +2853,14 @@ class App(BaseHTTPRequestHandler):
         try:
             with db() as conn:
                 ts = now()
-                cur = conn.execute("INSERT INTO users(username,password_hash,recovery_hash,role,is_owner,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (username, hash_password(password), hash_password(recovery_code), role, 0, "ACTIVE", ts, ts))
+                limits = PLAN_CONFIG["STARSHIP"]["limits"] if role == "ADMIN" else {kind: 0 for kind in QUERY_QUOTA_FIELDS}
+                cur = conn.execute(
+                    """INSERT INTO users(username,password_hash,recovery_hash,role,is_owner,status,
+                                         query_limit,ip_query_limit,device_query_limit,wallet_query_limit,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (username, hash_password(password), hash_password(recovery_code), role, 0, "ACTIVE",
+                     limits["ip"], limits["ip"], limits["device"], limits["wallet"], ts, ts),
+                )
                 log_action(conn, session["user"]["id"], "CREATE_USER", "USER", cur.lastrowid, username)
         except sqlite3.IntegrityError:
             return self.redirect("/users?error=" + urllib.parse.quote("用户名已存在，请换一个。"))
@@ -2893,6 +2918,57 @@ class App(BaseHTTPRequestHandler):
         for token, active_session in list(SESSIONS.items()):
             if active_session["user_id"] == user_id:
                 SESSIONS.pop(token, None)
+        self.redirect("/users")
+
+    def adjust_user_quota(self):
+        session = self.require_user(admin=True)
+        if not session:
+            return
+        if not session["user"]["is_owner"]:
+            self.send_html(self.page(session, "无权访问", '<div class="card"><h2>需要总管理员权限</h2></div>'), 403)
+            return
+        form = self.form()
+        if not self.valid_csrf(session, form):
+            return self.send_html("Forbidden", 403)
+        try:
+            user_id = int(form.get("id", "0"))
+            additions = {kind: int(form.get("%s_add" % kind, "0")) for kind in QUERY_QUOTA_FIELDS}
+        except (TypeError, ValueError):
+            return self.redirect("/users?error=" + urllib.parse.quote("增加次数必须是有效的非负整数。"))
+        if user_id <= 0 or any(amount < 0 or amount > 1000000 for amount in additions.values()):
+            return self.redirect("/users?error=" + urllib.parse.quote("增加次数仅支持 0 到 1,000,000。"))
+        if not any(additions.values()):
+            return self.redirect("/users?error=" + urllib.parse.quote("请至少填写一项需要增加的查询次数。"))
+        with db() as conn:
+            target = conn.execute("SELECT * FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone()
+            if not target or target["is_owner"]:
+                return self.redirect("/users?error=" + urllib.parse.quote("目标用户不存在或属于受保护的总管理员账号。"))
+            updates, params, effective = [], [], {}
+            for kind, amount in additions.items():
+                limit_field, _, _ = QUERY_QUOTA_FIELDS[kind]
+                if int(target[limit_field] or 0) < 0:
+                    effective[kind] = 0
+                    continue
+                if target["role"] == "ADMIN" and int(target[limit_field] or 0) == 0:
+                    baseline = PLAN_CONFIG["STARSHIP"]["limits"][kind]
+                    updates.append("%s=?" % limit_field)
+                    params.append(baseline + amount)
+                else:
+                    updates.append("%s=%s+?" % (limit_field, limit_field))
+                    params.append(amount)
+                effective[kind] = amount
+            if updates:
+                if effective["ip"]:
+                    if target["role"] == "ADMIN" and int(target["ip_query_limit"] or 0) == 0:
+                        updates.append("query_limit=?")
+                        params.append(PLAN_CONFIG["STARSHIP"]["limits"]["ip"] + effective["ip"])
+                    else:
+                        updates.append("query_limit=query_limit+?")
+                        params.append(effective["ip"])
+                updates.append("updated_at=?")
+                params.extend([now(), user_id])
+                conn.execute("UPDATE users SET %s WHERE id=?" % ",".join(updates), params)
+            log_action(conn, session["user"]["id"], "ADJUST_QUERY_QUOTA", "USER", user_id, json.dumps({"username": target["username"], "added": effective, "unlimited": [kind for kind, amount in additions.items() if amount and effective[kind] == 0]}, ensure_ascii=False))
         self.redirect("/users")
 
     def analytics(self, query):
